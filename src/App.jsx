@@ -220,14 +220,73 @@ async function saveProfileToSupabase(session, fullName) {
   }
 }
 
-async function loadProfileFromSupabase(session, setStudentName) {
+async function saveExtendedProfileToSupabase(session, profile) {
+  if (!supabase || !session?.user?.id) {
+    return false
+  }
+
+  const { error } = await supabase
+    .from('profiles')
+    .upsert({
+      id: session.user.id,
+      full_name: profile.studentName.trim(),
+      prn_number: profile.prnNumber.trim() || null,
+      university_email: profile.universityEmail.trim().toLowerCase() || null,
+      avatar_url: profile.avatarUrl || null,
+    })
+
+  if (error) {
+    console.error('Failed to save extended profile to Supabase:', error)
+    return false
+  }
+
+  return true
+}
+
+async function uploadProfilePhoto(session, file) {
+  if (!supabase || !session?.user?.id || !file) {
+    return null
+  }
+
+  if (!file.type.startsWith('image/')) {
+    throw new Error('Please choose an image file.')
+  }
+
+  if (file.size > 2 * 1024 * 1024) {
+    throw new Error('Profile photos must be 2 MB or smaller.')
+  }
+
+  const extension = file.name.split('.').pop()?.toLowerCase() || 'jpg'
+  const path = `${session.user.id}/profile.${extension}`
+  const { error: uploadError } = await supabase.storage
+    .from('profile-photos')
+    .upload(path, file, { upsert: true, contentType: file.type })
+
+  if (uploadError) {
+    console.error('Failed to upload profile photo:', uploadError)
+    throw new Error('Could not upload the profile photo. Check the Supabase storage setup.')
+  }
+
+  const { data, error: signedUrlError } = await supabase.storage
+    .from('profile-photos')
+    .createSignedUrl(path, 60 * 60 * 24 * 7)
+
+  if (signedUrlError) {
+    console.error('Failed to create profile photo URL:', signedUrlError)
+    throw new Error('Photo uploaded, but it could not be displayed.')
+  }
+
+  return data.signedUrl
+}
+
+async function loadProfileFromSupabase(session, setProfile) {
   if (!supabase || !session?.user?.id) {
     return
   }
 
   const { data, error } = await supabase
     .from('profiles')
-    .select('full_name')
+    .select('full_name, prn_number, university_email, avatar_url')
     .eq('id', session.user.id)
     .maybeSingle()
 
@@ -237,7 +296,13 @@ async function loadProfileFromSupabase(session, setStudentName) {
   }
 
   if (data?.full_name) {
-    setStudentName(data.full_name)
+    setProfile((current) => ({
+      ...current,
+      studentName: data.full_name,
+      prnNumber: data.prn_number || '',
+      universityEmail: data.university_email || '',
+      avatarUrl: data.avatar_url || '',
+    }))
   }
 }
 
@@ -269,12 +334,23 @@ async function loadSubjectsFromSupabase(session, setSubjects) {
 }
 
 function Dashboard({ session, onLogout }) {
-  const [studentName, setStudentName] = useState(() => {
+  const [profile, setProfile] = useState(() => {
     const savedProfile =
       typeof window !== 'undefined' ? window.localStorage.getItem(PROFILE_STORAGE_KEY) : null
 
-    return session?.user?.user_metadata?.full_name || savedProfile || 'Aisha Rahman'
+    const savedName = session?.user?.user_metadata?.full_name || savedProfile || 'Aisha Rahman'
+    return {
+      studentName: savedName,
+      prnNumber: '',
+      universityEmail: '',
+      avatarUrl: '',
+    }
   })
+  const [profileMessage, setProfileMessage] = useState('')
+  const [profileError, setProfileError] = useState('')
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [profileEditing, setProfileEditing] = useState(false)
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   const [subjects, setSubjects] = useState(() => readStoredSubjects())
   const [form, setForm] = useState(emptySubjectForm)
   const [editingSubjectId, setEditingSubjectId] = useState(null)
@@ -295,13 +371,13 @@ function Dashboard({ session, onLogout }) {
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      window.localStorage.setItem(PROFILE_STORAGE_KEY, studentName)
+      window.localStorage.setItem(PROFILE_STORAGE_KEY, profile.studentName)
     }
 
-    if (session?.user?.id) {
-      saveProfileToSupabase(session, studentName)
+    if (session?.user?.id && profile.studentName) {
+      saveProfileToSupabase(session, profile.studentName)
     }
-  }, [studentName, session])
+  }, [profile.studentName, session])
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -314,9 +390,52 @@ function Dashboard({ session, onLogout }) {
       return
     }
 
-    loadProfileFromSupabase(session, setStudentName)
+    loadProfileFromSupabase(session, setProfile)
     loadSubjectsFromSupabase(session, setSubjects)
   }, [session])
+
+  const handleProfilePhotoChange = async (event) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    setProfileError('')
+    setProfileMessage('')
+    setProfileSaving(true)
+
+    try {
+      const avatarUrl = await uploadProfilePhoto(session, file)
+      if (!avatarUrl) throw new Error('Profile photo upload is unavailable.')
+      setProfile((current) => ({ ...current, avatarUrl }))
+      await saveExtendedProfileToSupabase(session, { ...profile, avatarUrl })
+      setProfileMessage('Profile photo updated.')
+    } catch (uploadError) {
+      setProfileError(uploadError.message || 'Could not update profile photo.')
+    } finally {
+      setProfileSaving(false)
+      event.target.value = ''
+    }
+  }
+
+  const handleProfileSave = async (event) => {
+    event.preventDefault()
+    setProfileError('')
+    setProfileMessage('')
+
+    if (profile.universityEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(profile.universityEmail)) {
+      setProfileError('Please enter a valid university email address.')
+      return
+    }
+
+    setProfileSaving(true)
+    const saved = await saveExtendedProfileToSupabase(session, profile)
+    setProfileSaving(false)
+    if (saved) {
+      setProfileMessage('Profile details saved.')
+      setProfileEditing(false)
+    } else {
+      setProfileMessage('Profile details could not be saved.')
+    }
+  }
 
   const totalClasses = subjects.reduce((sum, subject) => sum + Number(subject.total), 0)
   const totalAttended = subjects.reduce(
@@ -498,13 +617,47 @@ function Dashboard({ session, onLogout }) {
             <p className="eyebrow">Student account</p>
             <h1>Attendance Tracker</h1>
           </div>
-          <div className="profile-box">
-            <span>Student</span>
-            <strong>{studentName}</strong>
-            {onLogout && (
-              <button type="button" className="logout-button" onClick={onLogout}>
-                Logout
-              </button>
+          <div className="profile-menu">
+            <button
+              type="button"
+              className="profile-box"
+              onClick={() => setProfileMenuOpen((current) => !current)}
+              aria-expanded={profileMenuOpen}
+              aria-label="Open profile menu"
+            >
+              <div className="profile-box-heading">
+              <div className="header-avatar">
+                {profile.avatarUrl ? (
+                  <img src={profile.avatarUrl} alt="" />
+                ) : (
+                  <span>{profile.studentName.charAt(0).toUpperCase()}</span>
+                )}
+              </div>
+              <div>
+                <strong>{profile.studentName}</strong>
+              </div>
+              </div>
+              {profile.prnNumber && <small>PRN: {profile.prnNumber}</small>}
+            </button>
+            {profileMenuOpen && (
+              <div className="profile-dropdown">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProfileEditing(true)
+                    setProfileMenuOpen(false)
+                    setProfileMessage('')
+                    setProfileError('')
+                  }}
+                >
+                  Update profile
+                </button>
+                {onLogout && (
+                  <button type="button" onClick={onLogout}>
+                    Logout
+                  </button>
+                )}
+              </div>
             )}
           </div>
         </header>
@@ -615,18 +768,85 @@ function Dashboard({ session, onLogout }) {
             </form>
           </div>
 
+          {profileEditing && (
           <div className="panel">
-            <h2>Student summary</h2>
-            <div className="summary-list">
-              <div className="editable-row">
-                <span>Student name</span>
-                <input
-                  type="text"
-                  value={studentName}
-                  onChange={(event) => setStudentName(event.target.value)}
-                  className="name-input"
-                />
+            <h2>Profile</h2>
+            <div className="profile-editor">
+            <div className="avatar-preview">
+              {profile.avatarUrl ? (
+                <img src={profile.avatarUrl} alt="Profile" />
+              ) : (
+                <span>{profile.studentName.charAt(0).toUpperCase()}</span>
+              )}
+            </div>
+            <label className={`small-button upload-button ${!profileEditing ? 'disabled' : ''}`}>
+              {profileSaving ? 'Uploading...' : 'Upload profile photo'}
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                onChange={handleProfilePhotoChange}
+                disabled={profileSaving || !profileEditing}
+              />
+            </label>
+            </div>
+            <form className="profile-form" onSubmit={handleProfileSave}>
+            <label>
+              <span>Student name</span>
+              <input
+                type="text"
+                value={profile.studentName}
+                disabled={!profileEditing}
+                onChange={(event) =>
+                  setProfile((current) => ({ ...current, studentName: event.target.value }))
+                }
+              />
+            </label>
+            <label>
+              <span>PRN number</span>
+              <input
+                type="text"
+                value={profile.prnNumber}
+                disabled={!profileEditing}
+                onChange={(event) =>
+                  setProfile((current) => ({ ...current, prnNumber: event.target.value }))
+                }
+                placeholder="Enter your PRN"
+              />
+            </label>
+            <label>
+              <span>University email (optional)</span>
+              <input
+                type="email"
+                value={profile.universityEmail}
+                disabled={!profileEditing}
+                onChange={(event) =>
+                  setProfile((current) => ({ ...current, universityEmail: event.target.value }))
+                }
+                placeholder="student@university.ac.in"
+              />
+            </label>
+            {profileError && <div className="feedback error">{profileError}</div>}
+            {profileMessage && <div className="feedback success">{profileMessage}</div>}
+            {profileEditing && (
+              <div className="form-actions">
+                <button type="submit" className="primary-button" disabled={profileSaving}>
+                  {profileSaving ? 'Saving...' : 'Save profile'}
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button button-ghost"
+                  onClick={() => {
+                    setProfileEditing(false)
+                    setProfileError('')
+                    setProfileMessage('')
+                  }}
+                >
+                  Cancel
+                </button>
               </div>
+            )}
+            </form>
+            <div className="summary-list">
               <div>
                 <span>Overall attendance</span>
                 <strong>{overallAttendance.toFixed(2)}%</strong>
@@ -641,6 +861,7 @@ function Dashboard({ session, onLogout }) {
               </div>
             </div>
           </div>
+          )}
         </section>
 
         <section className="panel table-panel">
