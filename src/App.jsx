@@ -115,6 +115,41 @@ function getOverallTargetPlan(attended, total, targetPercent = 75) {
   }
 }
 
+function getOverallPlanDetails(attended, total, targetPercent = 75) {
+  if (!Number(total) || Number(total) <= 0) {
+    return {
+      type: 'neutral',
+      count: 0,
+      progress: 0,
+      label: 'Add subjects',
+      text: 'Add subjects to see your overall attendance plan.',
+    }
+  }
+
+  const percentage = calculatePercentage(attended, total)
+  const target = Number(targetPercent)
+
+  if (percentage >= target) {
+    const count = getClassesMissed(attended, total, target)
+    return {
+      type: 'safe',
+      count,
+      progress: Math.min(100, (count / Math.max(1, total + count)) * 100),
+      label: 'Classes can be missed',
+      text: `You can miss ${count} class${count === 1 ? '' : 'es'} and stay at or above ${target}%.`,
+    }
+  }
+
+  const count = getClassesRequired(attended, total, target)
+  return {
+    type: 'warning',
+    count,
+    progress: Math.min(100, (count / Math.max(1, total + count)) * 100),
+    label: 'Classes to attend',
+    text: `You need to attend ${count} more class${count === 1 ? '' : 'es'} to reach ${target}%.`,
+  }
+}
+
 const STORAGE_KEY = 'attendance-tracker-subjects-v1'
 const PROFILE_STORAGE_KEY = 'attendance-tracker-profile-v1'
 
@@ -447,6 +482,7 @@ function Dashboard({ session, onLogout }) {
     ? subjects.reduce((sum, subject) => sum + Number(subject.target), 0) / subjects.length
     : 0
   const overallTargetPlan = getOverallTargetPlan(totalAttended, totalClasses, 75)
+  const overallPlanDetails = getOverallPlanDetails(totalAttended, totalClasses, 75)
 
   const handleSubjectInput = (event) => {
     const { name, value } = event.target
@@ -685,11 +721,6 @@ function Dashboard({ session, onLogout }) {
           </div>
         </section>
 
-        <div className={`overall-plan-box ${overallTargetPlan.type}`}>
-          <strong>Overall target plan</strong>
-          <p>{overallTargetPlan.text}</p>
-        </div>
-
         <section className="content-grid">
           <div className="panel">
             <h2>Add subject</h2>
@@ -768,7 +799,36 @@ function Dashboard({ session, onLogout }) {
             </form>
           </div>
 
-          {profileEditing && (
+          <div className="panel plan-ring-panel">
+            <div className="panel-heading-row">
+              <div>
+                <p className="panel-kicker">Overall target</p>
+                <h2>75% attendance plan</h2>
+              </div>
+              <span className={`plan-state ${overallPlanDetails.type}`}>
+                {overallPlanDetails.type === 'safe' ? 'On track' : overallPlanDetails.type === 'warning' ? 'Action needed' : 'Waiting'}
+              </span>
+            </div>
+            <div
+              className={`plan-ring ${overallPlanDetails.type}`}
+              style={{ '--ring-progress': `${overallPlanDetails.progress}%` }}
+              role="img"
+              aria-label={`${overallPlanDetails.count} ${overallPlanDetails.label.toLowerCase()}`}
+            >
+              <div className="plan-ring-inner">
+                <strong>{overallPlanDetails.count}</strong>
+                <span>{overallPlanDetails.label}</span>
+              </div>
+            </div>
+            <p className="plan-ring-text">{overallPlanDetails.text}</p>
+            <div className="plan-ring-caption">
+              Current overall attendance: <strong>{overallAttendance.toFixed(2)}%</strong>
+            </div>
+          </div>
+        </section>
+
+        {profileEditing && (
+        <section className="content-grid profile-edit-grid">
           <div className="panel">
             <h2>Profile</h2>
             <div className="profile-editor">
@@ -861,8 +921,8 @@ function Dashboard({ session, onLogout }) {
               </div>
             </div>
           </div>
-          )}
         </section>
+        )}
 
         <section className="panel table-panel">
           <h2>Subject table</h2>
