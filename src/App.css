@@ -293,6 +293,18 @@ p {
   background: #fff5f5;
 }
 
+.small-button.present-button {
+  border-color: #a7f3d0;
+  color: #166534;
+  background: #ecfdf5;
+}
+
+.small-button.absent-button {
+  border-color: #fed7aa;
+  color: #9a3412;
+  background: #fff7ed;
+}
+
 .row-actions {
   display: flex;
   gap: 8px;
@@ -335,6 +347,13 @@ p {
 
 .table-panel {
   overflow: hidden;
+}
+
+.section-help {
+  margin: -8px 0 16px;
+  color: #475569;
+  font-size: 0.9rem;
+  line-height: 1.5;
 }
 
 .table-wrap {

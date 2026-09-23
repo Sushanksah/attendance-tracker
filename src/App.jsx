@@ -133,7 +133,7 @@ function readStoredSubjects() {
 
 async function saveSubjectToSupabase(session, subject, isUpdate = false) {
   if (!supabase || !session?.user?.id) {
-    return
+    return null
   }
 
   const payload = {
@@ -149,15 +149,48 @@ async function saveSubjectToSupabase(session, subject, isUpdate = false) {
 
     if (error) {
       console.error('Failed to update subject in Supabase:', error)
+      return null
     }
 
-    return
+    return subject
   }
 
-  const { error } = await supabase.from('subjects').insert([payload])
+  const { data, error } = await supabase.from('subjects').insert([payload]).select().single()
 
   if (error) {
     console.error('Failed to save subject to Supabase:', error)
+    return null
+  }
+
+  return data
+    ? {
+        id: data.id,
+        name: data.subject_name,
+        total: Number(data.total_classes),
+        attended: Number(data.attended_classes),
+        target: Number(data.target_percentage),
+      }
+    : null
+}
+
+async function saveAttendanceLogToSupabase(session, subject, action, notes) {
+  if (!supabase || !session?.user?.id || !subject?.id) {
+    return
+  }
+
+  const { error } = await supabase.from('attendance_logs').insert([
+    {
+      user_id: session.user.id,
+      subject_id: subject.id,
+      action,
+      attended_classes: Number(subject.attended),
+      total_classes: Number(subject.total),
+      notes,
+    },
+  ])
+
+  if (error) {
+    console.error('Failed to save attendance log in Supabase:', error)
   }
 }
 
@@ -224,17 +257,15 @@ async function loadSubjectsFromSupabase(session, setSubjects) {
     return
   }
 
-  if (Array.isArray(data) && data.length > 0) {
-    const mapped = data.map((item) => ({
-      id: item.id,
-      name: item.subject_name,
-      total: Number(item.total_classes),
-      attended: Number(item.attended_classes),
-      target: Number(item.target_percentage),
-    }))
+  const mapped = (data || []).map((item) => ({
+    id: item.id,
+    name: item.subject_name,
+    total: Number(item.total_classes),
+    attended: Number(item.attended_classes),
+    target: Number(item.target_percentage),
+  }))
 
-    setSubjects(mapped)
-  }
+  setSubjects(mapped)
 }
 
 function Dashboard({ session, onLogout }) {
@@ -314,7 +345,7 @@ function Dashboard({ session, onLogout }) {
     }))
   }
 
-  const handleAddSubject = (event) => {
+  const handleAddSubject = async (event) => {
     event.preventDefault()
     setError('')
 
@@ -383,18 +414,56 @@ function Dashboard({ session, onLogout }) {
       target,
     }
 
+    if (session?.user?.id && supabase) {
+      const savedSubject = await saveSubjectToSupabase(session, newSubject)
+      if (savedSubject) {
+        newSubject.id = savedSubject.id
+      }
+    }
+
     const nextSubjects = [...subjects, newSubject]
     setSubjects(nextSubjects)
-
-    if (session?.user?.id && supabase) {
-      saveSubjectToSupabase(session, newSubject)
-    }
 
     setPlannerInputs((current) => ({
       ...current,
       [newSubject.id]: 0,
     }))
     setForm(emptySubjectForm)
+  }
+
+  const handleMarkAttendance = async (subjectId, attended) => {
+    setError('')
+
+    const subject = subjects.find((item) => item.id === subjectId)
+    if (!subject) {
+      setError('Could not find that subject.')
+      return
+    }
+
+    const updatedSubject = {
+      ...subject,
+      total: Number(subject.total) + 1,
+      attended: Number(subject.attended) + (attended ? 1 : 0),
+    }
+
+    setSubjects((current) =>
+      current.map((item) => (item.id === subjectId ? updatedSubject : item)),
+    )
+
+    if (session?.user?.id && supabase) {
+      const savedSubject = await saveSubjectToSupabase(session, updatedSubject, true)
+      if (!savedSubject) {
+        setError('Attendance changed locally, but could not be saved to Supabase.')
+        return
+      }
+
+      await saveAttendanceLogToSupabase(
+        session,
+        updatedSubject,
+        'update',
+        attended ? 'Marked present' : 'Marked absent',
+      )
+    }
   }
 
   const handleEditSubject = (subject) => {
@@ -576,6 +645,9 @@ function Dashboard({ session, onLogout }) {
 
         <section className="panel table-panel">
           <h2>Subject table</h2>
+          <p className="section-help">
+            After each class, click Present or Absent. The total and attended counts will update automatically.
+          </p>
           <div className="table-wrap">
             <table>
               <thead>
@@ -610,6 +682,20 @@ function Dashboard({ session, onLogout }) {
                       </td>
                       <td>
                         <div className="row-actions">
+                          <button
+                            type="button"
+                            className="small-button present-button"
+                            onClick={() => handleMarkAttendance(subject.id, true)}
+                          >
+                            Present
+                          </button>
+                          <button
+                            type="button"
+                            className="small-button absent-button"
+                            onClick={() => handleMarkAttendance(subject.id, false)}
+                          >
+                            Absent
+                          </button>
                           <button type="button" className="small-button" onClick={() => handleEditSubject(subject)}>
                             Edit
                           </button>
