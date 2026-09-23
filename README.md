@@ -1,16 +1,38 @@
-# React + Vite
+# Attendance Tracker
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+A responsive React and Vite application for tracking student attendance.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- Supabase signup, login, password reset, and logout
+- Add, edit, and delete subjects
+- Overall attendance calculation
+- Subject attendance status
+- Classes required to reach a target
+- Classes that can be missed while maintaining a target
+- Attendance planner and what-if calculator
+- Supabase Row Level Security for user-specific data
 
-## React Compiler
+## Local setup
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+npm install
+cp .env.example .env
+npm run dev
+```
 
-## Expanding the Oxlint configuration
+Add the Supabase project URL and anon/public key to `.env`:
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+```text
+VITE_SUPABASE_URL=https://your-project-id.supabase.co
+VITE_SUPABASE_ANON_KEY=your-anon-key
+```
+
+Run [supabase-schema.sql](./supabase-schema.sql) in the Supabase SQL Editor before testing database features.
+
+## Validation
+
+```bash
+npm run lint
+npm run build
+```
