@@ -21,6 +21,108 @@ const emptyAuthForm = {
   password: '',
 }
 
+const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
+const GOOGLE_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly'
+
+function loadGoogleIdentityScript() {
+  if (window.google?.accounts?.oauth2) {
+    return Promise.resolve()
+  }
+
+  return new Promise((resolve, reject) => {
+    const existingScript = document.querySelector('script[data-google-identity]')
+    if (existingScript) {
+      existingScript.addEventListener('load', resolve, { once: true })
+      existingScript.addEventListener('error', reject, { once: true })
+      return
+    }
+
+    const script = document.createElement('script')
+    script.src = 'https://accounts.google.com/gsi/client'
+    script.async = true
+    script.defer = true
+    script.dataset.googleIdentity = 'true'
+    script.onload = resolve
+    script.onerror = () => reject(new Error('Google Calendar could not be loaded.'))
+    document.head.appendChild(script)
+  })
+}
+
+function getCalendarDateRange() {
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(start)
+  end.setDate(end.getDate() + 5)
+  return { timeMin: start.toISOString(), timeMax: end.toISOString() }
+}
+
+function getCalendarEventDate(event) {
+  const value = event.start?.dateTime || event.start?.date
+  if (!value) return null
+
+  if (event.start?.date) {
+    const [year, month, day] = value.split('-').map(Number)
+    return new Date(year, month - 1, day)
+  }
+
+  return new Date(value)
+}
+
+function getLocalDateKey(date) {
+  if (!date) return ''
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function getCalendarDayLabel(date) {
+  if (!date) return 'Scheduled'
+  return date.toLocaleDateString([], {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  })
+}
+
+function isCancelledCalendarEvent(event) {
+  const status = `${event.status || ''} ${event.summary || ''} ${event.description || ''}`.toLowerCase()
+  return status.includes('cancelled') || status.includes('canceled')
+}
+
+function getCalendarAttendanceAdvice(event, subjects, attended, total, overallAttendance) {
+  const title = `${event.summary || ''} ${event.description || ''}`.toLowerCase()
+  const subject = subjects.find((item) => title.includes(item.name.toLowerCase()))
+
+  if (subject) {
+    const attendPercentage = calculatePercentage(subject.attended + 1, subject.total + 1)
+    const leavePercentage = calculatePercentage(subject.attended, subject.total + 1)
+    const attendChange = attendPercentage - calculatePercentage(subject.attended, subject.total)
+    const leaveChange = leavePercentage - calculatePercentage(subject.attended, subject.total)
+    return {
+      tone: leavePercentage >= subject.target ? 'safe' : 'need',
+      decision:
+        leavePercentage >= subject.target
+          ? 'Can leave and remain at target'
+          : 'Need to attend to reach the subject target',
+      details: `Attend: ${attendPercentage.toFixed(2)}% (${attendChange >= 0 ? '+' : ''}${attendChange.toFixed(2)} points) · Leave: ${leavePercentage.toFixed(2)}% (${leaveChange.toFixed(2)} points)`,
+    }
+  }
+
+  const attendPercentage = calculatePercentage(attended + 1, total + 1)
+  const leavePercentage = calculatePercentage(attended, total + 1)
+  const attendChange = attendPercentage - overallAttendance
+  const leaveChange = leavePercentage - overallAttendance
+  return {
+    tone: leavePercentage >= 75 ? 'safe' : 'need',
+    decision:
+      leavePercentage >= 75
+        ? 'Can leave and remain at the overall target'
+        : 'Need to attend to reach the overall target',
+    details: `Attend: ${attendPercentage.toFixed(2)}% (${attendChange >= 0 ? '+' : ''}${attendChange.toFixed(2)} points) · Leave: ${leavePercentage.toFixed(2)}% (${leaveChange.toFixed(2)} points)`,
+  }
+}
+
 function calculatePercentage(attended, total) {
   if (!total || total <= 0) return 0
   return (attended / total) * 100
@@ -386,6 +488,12 @@ function Dashboard({ session, onLogout }) {
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileEditing, setProfileEditing] = useState(false)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
+  const [subjectPendingDelete, setSubjectPendingDelete] = useState(null)
+  const [deleteConfirmation, setDeleteConfirmation] = useState('')
+  const [calendarEvents, setCalendarEvents] = useState([])
+  const [calendarLoading, setCalendarLoading] = useState(false)
+  const [calendarError, setCalendarError] = useState('')
+  const [calendarConnected, setCalendarConnected] = useState(false)
   const [subjects, setSubjects] = useState(() => readStoredSubjects())
   const [form, setForm] = useState(emptySubjectForm)
   const [editingSubjectId, setEditingSubjectId] = useState(null)
@@ -483,6 +591,139 @@ function Dashboard({ session, onLogout }) {
     : 0
   const overallTargetPlan = getOverallTargetPlan(totalAttended, totalClasses, 75)
   const overallPlanDetails = getOverallPlanDetails(totalAttended, totalClasses, 75)
+
+  const loadCalendarEvents = async (accessToken) => {
+    const { timeMin, timeMax } = getCalendarDateRange()
+    const requestOptions = {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    }
+    const calendarListResponse = await fetch(
+      'https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=250',
+      requestOptions,
+    )
+
+    if (!calendarListResponse.ok) {
+      throw new Error('Google Calendar list could not be read. Please connect again.')
+    }
+
+    const calendarList = await calendarListResponse.json()
+    const calendars = calendarList.items || []
+    const eventLists = await Promise.all(
+      calendars.map(async (calendar) => {
+        const params = new URLSearchParams({
+          timeMin,
+          timeMax,
+          singleEvents: 'true',
+          orderBy: 'startTime',
+          maxResults: '50',
+          showDeleted: 'false',
+        })
+        const response = await fetch(
+          `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendar.id)}/events?${params.toString()}`,
+          requestOptions,
+        )
+
+        if (!response.ok) {
+          return []
+        }
+
+        const data = await response.json()
+        return (data.items || []).map((event) => ({
+          ...event,
+          calendarName: calendar.summary || calendar.id,
+        }))
+      }),
+    )
+
+    const events = eventLists
+      .flat()
+      .sort((first, second) => {
+        const firstStart = first.start?.dateTime || first.start?.date || ''
+        const secondStart = second.start?.dateTime || second.start?.date || ''
+        return firstStart.localeCompare(secondStart)
+      })
+
+    setCalendarEvents(events)
+  }
+
+  const requestCalendarAccess = async (prompt) => {
+    await loadGoogleIdentityScript()
+
+    return new Promise((resolve, reject) => {
+      const tokenClient = window.google.accounts.oauth2.initTokenClient({
+        client_id: googleClientId,
+        scope: GOOGLE_CALENDAR_SCOPE,
+        callback: (tokenResponse) => {
+          if (tokenResponse.error) {
+            reject(new Error('Google Calendar permission was not granted.'))
+            return
+          }
+
+          const expiresAt = Date.now() + Number(tokenResponse.expires_in || 3600) * 1000
+          window.localStorage.setItem(
+            `attendance-calendar-token-${session.user.id}`,
+            JSON.stringify({
+              accessToken: tokenResponse.access_token,
+              expiresAt,
+            }),
+          )
+          resolve(tokenResponse.access_token)
+        },
+      })
+      tokenClient.requestAccessToken({ prompt })
+    })
+  }
+
+  const connectCalendarWithPrompt = async (prompt) => {
+    const accessToken = await requestCalendarAccess(prompt)
+    await loadCalendarEvents(accessToken)
+    setCalendarConnected(true)
+  }
+
+  const handleCalendarConnect = async () => {
+    setCalendarError('')
+
+    if (!googleClientId) {
+      setCalendarError('Google Calendar is not configured for this deployment.')
+      return
+    }
+
+    setCalendarLoading(true)
+
+    try {
+      await connectCalendarWithPrompt('consent')
+    } catch (calendarLoadError) {
+      setCalendarError(calendarLoadError.message || 'Could not connect Google Calendar.')
+      setCalendarLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!session?.user?.id || !googleClientId) return
+
+    const savedToken = window.localStorage.getItem(
+      `attendance-calendar-token-${session.user.id}`,
+    )
+    if (!savedToken) return
+
+    try {
+      const { accessToken, expiresAt } = JSON.parse(savedToken)
+      setCalendarLoading(true)
+      const loadPromise =
+        accessToken && Number(expiresAt) > Date.now()
+          ? loadCalendarEvents(accessToken)
+          : connectCalendarWithPrompt('none')
+
+      loadPromise
+        .then(() => setCalendarConnected(true))
+        .catch(() => {
+          window.localStorage.removeItem(`attendance-calendar-token-${session.user.id}`)
+        })
+        .finally(() => setCalendarLoading(false))
+    } catch {
+      window.localStorage.removeItem(`attendance-calendar-token-${session.user.id}`)
+    }
+  }, [session])
 
   const handleSubjectInput = (event) => {
     const { name, value } = event.target
@@ -631,7 +872,17 @@ function Dashboard({ session, onLogout }) {
     })
   }
 
-  const handleDeleteSubject = (subjectId) => {
+  const requestDeleteSubject = (subject) => {
+    setSubjectPendingDelete(subject)
+    setDeleteConfirmation('')
+  }
+
+  const handleDeleteSubject = () => {
+    if (!subjectPendingDelete || deleteConfirmation !== 'DELETE') {
+      return
+    }
+
+    const subjectId = subjectPendingDelete.id
     const filtered = subjects.filter((subject) => subject.id !== subjectId)
     setSubjects(filtered)
 
@@ -643,6 +894,78 @@ function Dashboard({ session, onLogout }) {
       setEditingSubjectId(null)
       setForm(emptySubjectForm)
     }
+
+    setSubjectPendingDelete(null)
+    setDeleteConfirmation('')
+  }
+
+  const today = new Date()
+  const todayKey = getLocalDateKey(today)
+  const todayTomorrowEvents = calendarEvents.filter((event) => {
+    if (isCancelledCalendarEvent(event)) return false
+    const key = getLocalDateKey(getCalendarEventDate(event))
+    return key === todayKey
+  })
+  const todayEvents = todayTomorrowEvents.filter(
+    (event) => getLocalDateKey(getCalendarEventDate(event)) === todayKey,
+  )
+  const todayScenarios = Array.from({ length: todayEvents.length + 1 }, (_, attendedToday) => {
+    const projectedAttendance = calculatePercentage(
+      totalAttended + attendedToday,
+      totalClasses + todayEvents.length,
+    )
+    const change = projectedAttendance - overallAttendance
+    return {
+      attendedToday,
+      projectedAttendance,
+      change,
+      decision:
+        projectedAttendance >= 75
+          ? attendedToday === 0
+            ? 'You can leave all valid classes'
+            : `Attend ${attendedToday} class${attendedToday === 1 ? '' : 'es'}`
+          : attendedToday === 0
+            ? 'Leaving all valid classes goes below 75%'
+            : `Attend ${attendedToday} class${attendedToday === 1 ? '' : 'es'} — still below 75%`,
+    }
+  })
+
+  const renderCalendarEvent = (event, showRecommendation) => {
+    const eventDate = getCalendarEventDate(event)
+    const recommendation = getCalendarAttendanceAdvice(
+      event,
+      subjects,
+      totalAttended,
+      totalClasses,
+      overallAttendance,
+    )
+
+    return (
+      <article className="calendar-event" key={`${event.calendarName}-${event.id}`}>
+        <div className="calendar-event-time">
+          <strong>{getCalendarDayLabel(eventDate)}</strong>
+          <span>
+            {eventDate && event.start?.dateTime
+              ? eventDate.toLocaleTimeString([], {
+                  hour: 'numeric',
+                  minute: '2-digit',
+                })
+              : 'All day'}
+          </span>
+        </div>
+        <div className="calendar-event-details">
+          <strong>{event.summary || 'Untitled event'}</strong>
+          <span>{event.calendarName}</span>
+          {event.location && <span>{event.location}</span>}
+          {showRecommendation && (
+            <div className={`calendar-advice ${recommendation.tone}`}>
+              <strong className="calendar-recommendation">{recommendation.decision}</strong>
+              <span>{recommendation.details}</span>
+            </div>
+          )}
+        </div>
+      </article>
+    )
   }
 
   return (
@@ -719,6 +1042,92 @@ function Dashboard({ session, onLogout }) {
             <span>Average target</span>
             <strong>{targetPercentage.toFixed(0)}%</strong>
           </div>
+        </section>
+
+        <section className="panel calendar-panel">
+          <div className="calendar-header">
+            <div>
+              <p className="panel-kicker">Schedule</p>
+              <h2>Today’s classes</h2>
+              <p className="section-help">
+                {today.toLocaleDateString([], {
+                  weekday: 'long',
+                  month: 'long',
+                  day: 'numeric',
+                  year: 'numeric',
+                })}
+                {' · '}
+                Cancelled classes are not counted.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="primary-button calendar-connect-button"
+              onClick={handleCalendarConnect}
+              disabled={calendarLoading}
+            >
+              {calendarLoading
+                ? 'Connecting...'
+                : calendarConnected
+                  ? 'Refresh calendar'
+                  : 'Connect Google Calendar'}
+            </button>
+          </div>
+
+          {calendarError && <div className="feedback error">{calendarError}</div>}
+
+          {calendarConnected && calendarEvents.length === 0 && (
+            <div className="info-box">
+              <strong>No classes found</strong>
+              <p>No Google Calendar events were found for the next five days.</p>
+            </div>
+          )}
+
+          {calendarConnected && (todayTomorrowEvents.length > 0 || todayEvents.length === 0) && (
+            <div className="calendar-layout">
+              <div className="calendar-day-group">
+                <h3>Attend or leave guidance</h3>
+                {todayTomorrowEvents.length > 0 ? (
+                  <div className="calendar-events">
+                    {todayTomorrowEvents.map((event) => renderCalendarEvent(event, true))}
+                  </div>
+                ) : (
+                  <p className="section-help">No valid classes are scheduled for today.</p>
+                )}
+              </div>
+              <div className="today-plan-card">
+                <p className="panel-kicker">Today’s decision</p>
+                <h3>What if I attend today?</h3>
+                {todayEvents.length === 0 ? (
+                  <p className="section-help">No valid classes today. Cancelled classes are not counted.</p>
+                ) : (
+                  <>
+                    <p className="today-plan-meta">
+                      {todayEvents.length} valid class{todayEvents.length === 1 ? '' : 'es'} · cancelled classes excluded
+                    </p>
+                    <div className="today-scenarios">
+                      {todayScenarios.map((scenario) => (
+                        <div
+                          className={`today-scenario ${
+                            scenario.projectedAttendance >= 75 ? 'safe' : 'need'
+                          }`}
+                          key={scenario.attendedToday}
+                        >
+                          <strong>{scenario.decision}</strong>
+                          <span>
+                            Overall: {scenario.projectedAttendance.toFixed(2)}% (
+                            {scenario.change >= 0 ? '+' : ''}
+                            {scenario.change.toFixed(2)} points)
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
         </section>
 
         <section className="content-grid">
@@ -980,7 +1389,7 @@ function Dashboard({ session, onLogout }) {
                           <button type="button" className="small-button" onClick={() => handleEditSubject(subject)}>
                             Edit
                           </button>
-                          <button type="button" className="small-button danger" onClick={() => handleDeleteSubject(subject.id)}>
+                          <button type="button" className="small-button danger" onClick={() => requestDeleteSubject(subject)}>
                             Delete
                           </button>
                         </div>
@@ -1186,6 +1595,50 @@ function Dashboard({ session, onLogout }) {
             </div>
           </div>
         </section>
+        {subjectPendingDelete && (
+          <div className="confirm-backdrop" role="presentation">
+            <section
+              className="confirm-dialog"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="delete-subject-title"
+            >
+              <p className="panel-kicker">Permanent action</p>
+              <h2 id="delete-subject-title">Delete {subjectPendingDelete.name}?</h2>
+              <p>
+                This removes the subject and its attendance data. Type <strong>DELETE</strong> to
+                confirm.
+              </p>
+              <input
+                type="text"
+                value={deleteConfirmation}
+                onChange={(event) => setDeleteConfirmation(event.target.value)}
+                placeholder="Type DELETE"
+                autoFocus
+              />
+              <div className="form-actions">
+                <button
+                  type="button"
+                  className="secondary-button button-ghost"
+                  onClick={() => {
+                    setSubjectPendingDelete(null)
+                    setDeleteConfirmation('')
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="small-button danger confirm-delete-button"
+                  onClick={handleDeleteSubject}
+                  disabled={deleteConfirmation !== 'DELETE'}
+                >
+                  Confirm delete
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
       </div>
     </main>
   )
