@@ -598,6 +598,8 @@ function Dashboard({ session, onLogout }) {
     0,
   )
   const overallAttendance = calculatePercentage(totalAttended, totalClasses)
+  const overallAttendanceTone =
+    overallAttendance < 75 ? 'below' : overallAttendance === 75 ? 'target' : 'above'
   const targetPercentage = subjects.length
     ? subjects.reduce((sum, subject) => sum + Number(subject.target), 0) / subjects.length
     : 0
@@ -890,6 +892,32 @@ function Dashboard({ session, onLogout }) {
       return false
     }
 
+    const subjectEvent = calendarEvents
+      .filter((event) => {
+        if (isCancelledCalendarEvent(event)) return false
+        const eventDate = getCalendarEventDate(event)
+        const title = `${event.summary || ''} ${event.description || ''}`.toLowerCase()
+        const eventStatus = getCalendarAttendanceStatus(calendarAttendance[getCalendarEventKey(event)])
+        const startsToday =
+          getLocalDateKey(eventDate) === getLocalDateKey(currentTime) &&
+          (!eventDate || eventDate <= currentTime)
+        return (
+          startsToday &&
+          title.includes(subject.name.toLowerCase()) &&
+          !eventStatus
+        )
+      })
+      .sort((first, second) => {
+        const firstTime = getCalendarEventDate(first)?.getTime() || 0
+        const secondTime = getCalendarEventDate(second)?.getTime() || 0
+        return firstTime - secondTime
+      })[0]
+
+    if (!subjectEvent) {
+      setError('Present or Absent is available only when an unmarked class is active in Google Calendar.')
+      return false
+    }
+
     const updatedSubject = {
       ...subject,
       total: Number(subject.total) + 1,
@@ -915,36 +943,17 @@ function Dashboard({ session, onLogout }) {
       )
     }
 
-    const subjectEvent = calendarEvents
-      .filter((event) => {
-        if (isCancelledCalendarEvent(event)) return false
-        const eventDate = getCalendarEventDate(event)
-        const title = `${event.summary || ''} ${event.description || ''}`.toLowerCase()
-        return (
-          getLocalDateKey(eventDate) === getLocalDateKey(new Date()) &&
-          title.includes(subject.name.toLowerCase()) &&
-          !calendarAttendance[getCalendarEventKey(event)]
-        )
-      })
-      .sort((first, second) => {
-        const firstTime = getCalendarEventDate(first)?.getTime() || 0
-        const secondTime = getCalendarEventDate(second)?.getTime() || 0
-        return firstTime - secondTime
-      })[0]
-
-    if (subjectEvent) {
-      setCalendarAttendance((current) => {
-        const next = {
-          ...current,
-          [getCalendarEventKey(subjectEvent)]: attended ? 'present' : 'absent',
-        }
-        window.localStorage.setItem(
-          `attendance-calendar-status-${session.user.id}`,
-          JSON.stringify(next),
-        )
-        return next
-      })
-    }
+    setCalendarAttendance((current) => {
+      const next = {
+        ...current,
+        [getCalendarEventKey(subjectEvent)]: attended ? 'present' : 'absent',
+      }
+      window.localStorage.setItem(
+        `attendance-calendar-status-${session.user.id}`,
+        JSON.stringify(next),
+      )
+      return next
+    })
 
     return true
   }
@@ -1173,6 +1182,37 @@ function Dashboard({ session, onLogout }) {
     )
   }
 
+  const getSubjectAttendanceActionState = (subject) => {
+    const matchingEvents = calendarEvents
+      .filter((event) => {
+        if (isCancelledCalendarEvent(event)) return false
+        const eventDate = getCalendarEventDate(event)
+        const title = `${event.summary || ''} ${event.description || ''}`.toLowerCase()
+        return (
+          getLocalDateKey(eventDate) === getLocalDateKey(currentTime) &&
+          title.includes(subject.name.toLowerCase())
+        )
+      })
+      .sort((first, second) => {
+        const firstTime = getCalendarEventDate(first)?.getTime() || 0
+        const secondTime = getCalendarEventDate(second)?.getTime() || 0
+        return firstTime - secondTime
+      })
+
+    const activeEvent = matchingEvents.find((event) => {
+      const status = getCalendarAttendanceStatus(calendarAttendance[getCalendarEventKey(event)])
+      const start = getCalendarEventDate(event)
+      return !status && (!start || start <= currentTime)
+    })
+
+    return {
+      available: Boolean(activeEvent),
+      message: activeEvent
+        ? 'Mark the active Google Calendar class'
+        : 'Available when the next matching calendar class starts',
+    }
+  }
+
   return (
     <main className="app-shell dashboard-shell">
       <div className="dashboard-container">
@@ -1227,7 +1267,7 @@ function Dashboard({ session, onLogout }) {
         </header>
 
         <section className="summary-grid">
-          <div className="metric-card highlight">
+          <div className={`metric-card highlight overall-card ${overallAttendanceTone}`}>
             <span>Overall attendance</span>
             <strong>{overallAttendance.toFixed(2)}%</strong>
           </div>
@@ -1615,10 +1655,16 @@ function Dashboard({ session, onLogout }) {
                       </td>
                       <td>
                         <div className="row-actions">
+                          {(() => {
+                            const actionState = getSubjectAttendanceActionState(subject)
+                            return (
+                              <>
                           <button
                             type="button"
                             className="small-button present-button"
                             onClick={() => handleMarkAttendance(subject.id, true)}
+                            disabled={!actionState.available}
+                            title={actionState.message}
                           >
                             Present
                           </button>
@@ -1626,9 +1672,14 @@ function Dashboard({ session, onLogout }) {
                             type="button"
                             className="small-button absent-button"
                             onClick={() => handleMarkAttendance(subject.id, false)}
+                            disabled={!actionState.available}
+                            title={actionState.message}
                           >
                             Absent
                           </button>
+                              </>
+                            )
+                          })()}
                           <button type="button" className="small-button" onClick={() => handleEditSubject(subject)}>
                             Edit
                           </button>
@@ -1820,6 +1871,7 @@ function Dashboard({ session, onLogout }) {
             </section>
           </div>
         )}
+        <footer className="app-footer">Developed by Sushank Sah · © 2026</footer>
       </div>
     </main>
   )
