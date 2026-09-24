@@ -68,6 +68,22 @@ function getCalendarEventDate(event) {
   return new Date(value)
 }
 
+function getCalendarEventEndDate(event) {
+  const value = event.end?.dateTime || event.end?.date
+  if (!value) return null
+
+  if (event.end?.date) {
+    const [year, month, day] = value.split('-').map(Number)
+    return new Date(year, month - 1, day)
+  }
+
+  return new Date(value)
+}
+
+function getCalendarEventKey(event) {
+  return `${event.calendarId || event.calendarName || 'calendar'}-${event.id}`
+}
+
 function getLocalDateKey(date) {
   if (!date) return ''
   const year = date.getFullYear()
@@ -90,37 +106,16 @@ function isCancelledCalendarEvent(event) {
   return status.includes('cancelled') || status.includes('canceled')
 }
 
-function getCalendarAttendanceAdvice(event, subjects, attended, total, overallAttendance) {
-  const title = `${event.summary || ''} ${event.description || ''}`.toLowerCase()
-  const subject = subjects.find((item) => title.includes(item.name.toLowerCase()))
-
-  if (subject) {
-    const attendPercentage = calculatePercentage(subject.attended + 1, subject.total + 1)
-    const leavePercentage = calculatePercentage(subject.attended, subject.total + 1)
-    const attendChange = attendPercentage - calculatePercentage(subject.attended, subject.total)
-    const leaveChange = leavePercentage - calculatePercentage(subject.attended, subject.total)
-    return {
-      tone: leavePercentage >= subject.target ? 'safe' : 'need',
-      decision:
-        leavePercentage >= subject.target
-          ? 'Can leave and remain at target'
-          : 'Need to attend to reach the subject target',
-      details: `Attend: ${attendPercentage.toFixed(2)}% (${attendChange >= 0 ? '+' : ''}${attendChange.toFixed(2)} points) · Leave: ${leavePercentage.toFixed(2)}% (${leaveChange.toFixed(2)} points)`,
-    }
+async function getGoogleApiError(response, fallbackMessage) {
+  try {
+    const data = await response.json()
+    const message = data.error?.message || data.error_description
+    if (message) return `${fallbackMessage} (${message})`
+  } catch {
+    // Use the fallback when Google does not return JSON.
   }
 
-  const attendPercentage = calculatePercentage(attended + 1, total + 1)
-  const leavePercentage = calculatePercentage(attended, total + 1)
-  const attendChange = attendPercentage - overallAttendance
-  const leaveChange = leavePercentage - overallAttendance
-  return {
-    tone: leavePercentage >= 75 ? 'safe' : 'need',
-    decision:
-      leavePercentage >= 75
-        ? 'Can leave and remain at the overall target'
-        : 'Need to attend to reach the overall target',
-    details: `Attend: ${attendPercentage.toFixed(2)}% (${attendChange >= 0 ? '+' : ''}${attendChange.toFixed(2)} points) · Leave: ${leavePercentage.toFixed(2)}% (${leaveChange.toFixed(2)} points)`,
-  }
+  return `${fallbackMessage} (HTTP ${response.status})`
 }
 
 function calculatePercentage(attended, total) {
@@ -494,16 +489,21 @@ function Dashboard({ session, onLogout }) {
   const [calendarLoading, setCalendarLoading] = useState(false)
   const [calendarError, setCalendarError] = useState('')
   const [calendarConnected, setCalendarConnected] = useState(false)
+  const [calendarAttendance, setCalendarAttendance] = useState(() => {
+    if (typeof window === 'undefined' || !session?.user?.id) return {}
+
+    try {
+      return JSON.parse(
+        window.localStorage.getItem(`attendance-calendar-status-${session.user.id}`) || '{}',
+      )
+    } catch {
+      return {}
+    }
+  })
   const [subjects, setSubjects] = useState(() => readStoredSubjects())
   const [form, setForm] = useState(emptySubjectForm)
   const [editingSubjectId, setEditingSubjectId] = useState(null)
   const [error, setError] = useState('')
-  const [plannerTarget, setPlannerTarget] = useState(75)
-  const [plannerInputs, setPlannerInputs] = useState({
-    1: 0,
-    2: 0,
-    3: 0,
-  })
   const [whatIf, setWhatIf] = useState({
     attended: 160,
     total: 215,
@@ -511,6 +511,12 @@ function Dashboard({ session, onLogout }) {
     futureMissed: 2,
     target: 75,
   })
+  const [currentTime, setCurrentTime] = useState(() => new Date())
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setCurrentTime(new Date()), 30_000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -603,12 +609,17 @@ function Dashboard({ session, onLogout }) {
     )
 
     if (!calendarListResponse.ok) {
-      throw new Error('Google Calendar list could not be read. Please connect again.')
+      throw new Error(
+        await getGoogleApiError(
+          calendarListResponse,
+          'Google Calendar could not read your calendar list',
+        ),
+      )
     }
 
     const calendarList = await calendarListResponse.json()
     const calendars = calendarList.items || []
-    const eventLists = await Promise.all(
+    const calendarResults = await Promise.all(
       calendars.map(async (calendar) => {
         const params = new URLSearchParams({
           timeMin,
@@ -624,24 +635,48 @@ function Dashboard({ session, onLogout }) {
         )
 
         if (!response.ok) {
-          return []
+          return {
+            events: [],
+            error: await getGoogleApiError(
+              response,
+              `Could not read the "${calendar.summary || calendar.id}" calendar`,
+            ),
+          }
         }
 
         const data = await response.json()
-        return (data.items || []).map((event) => ({
-          ...event,
-          calendarName: calendar.summary || calendar.id,
-        }))
+        return {
+          events: (data.items || []).map((event) => ({
+            ...event,
+            calendarId: calendar.id,
+            calendarName: calendar.summary || calendar.id,
+          })),
+          error: '',
+        }
       }),
     )
 
-    const events = eventLists
+    const failedCalendars = calendarResults.filter((result) => result.error)
+    const events = calendarResults
+      .flatMap((result) => result.events)
       .flat()
       .sort((first, second) => {
         const firstStart = first.start?.dateTime || first.start?.date || ''
         const secondStart = second.start?.dateTime || second.start?.date || ''
         return firstStart.localeCompare(secondStart)
       })
+
+    if (calendars.length === 0) {
+      throw new Error('Google Calendar returned no calendars for this account.')
+    }
+
+    if (failedCalendars.length === calendars.length) {
+      throw new Error(failedCalendars[0].error)
+    }
+
+    if (failedCalendars.length > 0 && events.length === 0) {
+      throw new Error(failedCalendars[0].error)
+    }
 
     setCalendarEvents(events)
   }
@@ -655,7 +690,17 @@ function Dashboard({ session, onLogout }) {
         scope: GOOGLE_CALENDAR_SCOPE,
         callback: (tokenResponse) => {
           if (tokenResponse.error) {
-            reject(new Error('Google Calendar permission was not granted.'))
+            reject(
+              new Error(
+                tokenResponse.error_description ||
+                  `Google Calendar authorization failed (${tokenResponse.error}).`,
+              ),
+            )
+            return
+          }
+
+          if (!tokenResponse.access_token) {
+            reject(new Error('Google did not return a Calendar access token. Please try again.'))
             return
           }
 
@@ -668,6 +713,13 @@ function Dashboard({ session, onLogout }) {
             }),
           )
           resolve(tokenResponse.access_token)
+        },
+        error_callback: (error) => {
+          const message =
+            error?.type === 'popup_closed'
+              ? 'Google Calendar sign-in was closed before access was granted.'
+              : 'Google Calendar sign-in could not open. Check your browser popup settings and try again.'
+          reject(new Error(message))
         },
       })
       tokenClient.requestAccessToken({ prompt })
@@ -693,7 +745,11 @@ function Dashboard({ session, onLogout }) {
     try {
       await connectCalendarWithPrompt('consent')
     } catch (calendarLoadError) {
+      window.localStorage.removeItem(`attendance-calendar-token-${session.user.id}`)
+      setCalendarConnected(false)
+      setCalendarEvents([])
       setCalendarError(calendarLoadError.message || 'Could not connect Google Calendar.')
+    } finally {
       setCalendarLoading(false)
     }
   }
@@ -716,8 +772,13 @@ function Dashboard({ session, onLogout }) {
 
       loadPromise
         .then(() => setCalendarConnected(true))
-        .catch(() => {
+        .catch((calendarLoadError) => {
           window.localStorage.removeItem(`attendance-calendar-token-${session.user.id}`)
+          setCalendarConnected(false)
+          setCalendarEvents([])
+          setCalendarError(
+            calendarLoadError.message || 'Could not restore Google Calendar access.',
+          )
         })
         .finally(() => setCalendarLoading(false))
     } catch {
@@ -730,14 +791,6 @@ function Dashboard({ session, onLogout }) {
     setForm((current) => ({
       ...current,
       [name]: value,
-    }))
-  }
-
-  const handlePlannerInput = (subjectId, value) => {
-    const nextValue = Number(value)
-    setPlannerInputs((current) => ({
-      ...current,
-      [subjectId]: Number.isFinite(nextValue) ? Math.max(nextValue, 0) : 0,
     }))
   }
 
@@ -819,11 +872,6 @@ function Dashboard({ session, onLogout }) {
 
     const nextSubjects = [...subjects, newSubject]
     setSubjects(nextSubjects)
-
-    setPlannerInputs((current) => ({
-      ...current,
-      [newSubject.id]: 0,
-    }))
     setForm(emptySubjectForm)
   }
 
@@ -833,7 +881,7 @@ function Dashboard({ session, onLogout }) {
     const subject = subjects.find((item) => item.id === subjectId)
     if (!subject) {
       setError('Could not find that subject.')
-      return
+      return false
     }
 
     const updatedSubject = {
@@ -850,7 +898,7 @@ function Dashboard({ session, onLogout }) {
       const savedSubject = await saveSubjectToSupabase(session, updatedSubject, true)
       if (!savedSubject) {
         setError('Attendance changed locally, but could not be saved to Supabase.')
-        return
+        return false
       }
 
       await saveAttendanceLogToSupabase(
@@ -860,6 +908,39 @@ function Dashboard({ session, onLogout }) {
         attended ? 'Marked present' : 'Marked absent',
       )
     }
+
+    const subjectEvent = calendarEvents
+      .filter((event) => {
+        if (isCancelledCalendarEvent(event)) return false
+        const eventDate = getCalendarEventDate(event)
+        const title = `${event.summary || ''} ${event.description || ''}`.toLowerCase()
+        return (
+          getLocalDateKey(eventDate) === getLocalDateKey(new Date()) &&
+          title.includes(subject.name.toLowerCase()) &&
+          !calendarAttendance[getCalendarEventKey(event)]
+        )
+      })
+      .sort((first, second) => {
+        const firstTime = getCalendarEventDate(first)?.getTime() || 0
+        const secondTime = getCalendarEventDate(second)?.getTime() || 0
+        return firstTime - secondTime
+      })[0]
+
+    if (subjectEvent) {
+      setCalendarAttendance((current) => {
+        const next = {
+          ...current,
+          [getCalendarEventKey(subjectEvent)]: attended ? 'present' : 'absent',
+        }
+        window.localStorage.setItem(
+          `attendance-calendar-status-${session.user.id}`,
+          JSON.stringify(next),
+        )
+        return next
+      })
+    }
+
+    return true
   }
 
   const handleEditSubject = (subject) => {
@@ -909,6 +990,11 @@ function Dashboard({ session, onLogout }) {
   const todayEvents = todayTomorrowEvents.filter(
     (event) => getLocalDateKey(getCalendarEventDate(event)) === todayKey,
   )
+  const sortedTodayEvents = [...todayEvents].sort((first, second) => {
+    const firstTime = getCalendarEventDate(first)?.getTime() || 0
+    const secondTime = getCalendarEventDate(second)?.getTime() || 0
+    return firstTime - secondTime
+  })
   const todayScenarios = Array.from({ length: todayEvents.length + 1 }, (_, attendedToday) => {
     const projectedAttendance = calculatePercentage(
       totalAttended + attendedToday,
@@ -930,37 +1016,89 @@ function Dashboard({ session, onLogout }) {
     }
   })
 
-  const renderCalendarEvent = (event, showRecommendation) => {
+  const renderCalendarEvent = (event, eventIndex, showRecommendation) => {
     const eventDate = getCalendarEventDate(event)
-    const recommendation = getCalendarAttendanceAdvice(
-      event,
-      subjects,
-      totalAttended,
-      totalClasses,
-      overallAttendance,
+    const eventEndDate = getCalendarEventEndDate(event)
+    const eventStatus = calendarAttendance[getCalendarEventKey(event)]
+    const now = currentTime
+    const isCompleted = eventEndDate && eventEndDate <= now
+    const isInProgress = eventDate && eventEndDate && eventDate <= now && eventEndDate > now
+    const classDuration = eventDate && eventEndDate ? eventEndDate.getTime() - eventDate.getTime() : 0
+    const elapsed = eventDate ? now.getTime() - eventDate.getTime() : 0
+    const progress = classDuration > 0
+      ? Math.min(100, Math.max(0, (elapsed / classDuration) * 100))
+      : 0
+    const remainingMinutes = isInProgress
+      ? Math.max(0, Math.ceil((eventEndDate.getTime() - now.getTime()) / 60000))
+      : 0
+    const classesBefore = eventIndex
+    const attendPercentage = calculatePercentage(
+      totalAttended + classesBefore + 1,
+      totalClasses + classesBefore + 1,
     )
+    const leavePercentage = calculatePercentage(
+      totalAttended + classesBefore,
+      totalClasses + classesBefore + 1,
+    )
+    const attendChange = attendPercentage - overallAttendance
+    const leaveChange = leavePercentage - overallAttendance
 
     return (
-      <article className="calendar-event" key={`${event.calendarName}-${event.id}`}>
+      <article
+        className={`calendar-event ${eventStatus ? `calendar-event-${eventStatus}` : ''}`}
+        key={`${event.calendarName}-${event.id}`}
+      >
         <div className="calendar-event-time">
           <strong>{getCalendarDayLabel(eventDate)}</strong>
           <span>
             {eventDate && event.start?.dateTime
-              ? eventDate.toLocaleTimeString([], {
-                  hour: 'numeric',
-                  minute: '2-digit',
-                })
+              ? `${eventDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} – ${
+                  eventEndDate?.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) || '—'
+                }`
               : 'All day'}
           </span>
+          <small>
+            {eventStatus === 'present'
+              ? 'Present'
+              : eventStatus === 'absent'
+                ? 'Absent'
+                : isInProgress
+                  ? 'In progress'
+                  : isCompleted
+                    ? 'Completed'
+                    : 'Upcoming'}
+          </small>
+          {isInProgress && (
+            <span className="class-countdown">
+              {remainingMinutes >= 60
+                ? `${Math.floor(remainingMinutes / 60)}h ${remainingMinutes % 60}m left`
+                : `${remainingMinutes}m left`}
+            </span>
+          )}
         </div>
         <div className="calendar-event-details">
           <strong>{event.summary || 'Untitled event'}</strong>
           <span>{event.calendarName}</span>
           {event.location && <span>{event.location}</span>}
+          {isInProgress && (
+            <div
+              className={`class-progress ${eventStatus ? `class-progress-${eventStatus}` : ''}`}
+              aria-label={`${Math.round(progress)}% of class completed`}
+            >
+              <span style={{ width: `${progress}%` }} />
+            </div>
+          )}
           {showRecommendation && (
-            <div className={`calendar-advice ${recommendation.tone}`}>
-              <strong className="calendar-recommendation">{recommendation.decision}</strong>
-              <span>{recommendation.details}</span>
+            <div className={`calendar-advice ${leavePercentage >= 75 ? 'safe' : 'need'}`}>
+              <strong className="calendar-recommendation">
+                Class {eventIndex + 1} of {todayEvents.length}
+              </strong>
+              <span>
+                Attend: {attendPercentage.toFixed(2)}% ({attendChange >= 0 ? '+' : ''}
+                {attendChange.toFixed(2)} points) · Miss: {leavePercentage.toFixed(2)}% (
+                {leaveChange >= 0 ? '+' : ''}
+                {leaveChange.toFixed(2)} points)
+              </span>
             </div>
           )}
         </div>
@@ -1083,13 +1221,23 @@ function Dashboard({ session, onLogout }) {
             </div>
           )}
 
+          {calendarConnected && calendarEvents.length > 0 && todayTomorrowEvents.length === 0 && (
+            <div className="info-box">
+              <strong>Calendar connected successfully</strong>
+              <p>
+                {calendarEvents.length} event{calendarEvents.length === 1 ? '' : 's'} loaded, but no valid
+                class is scheduled for today. Cancelled events are excluded.
+              </p>
+            </div>
+          )}
+
           {calendarConnected && (todayTomorrowEvents.length > 0 || todayEvents.length === 0) && (
             <div className="calendar-layout">
               <div className="calendar-day-group">
                 <h3>Attend or leave guidance</h3>
                 {todayTomorrowEvents.length > 0 ? (
                   <div className="calendar-events">
-                    {todayTomorrowEvents.map((event) => renderCalendarEvent(event, true))}
+                    {sortedTodayEvents.map((event, index) => renderCalendarEvent(event, index, true))}
                   </div>
                 ) : (
                   <p className="section-help">No valid classes are scheduled for today.</p>
@@ -1399,68 +1547,6 @@ function Dashboard({ session, onLogout }) {
                 })}
               </tbody>
             </table>
-          </div>
-        </section>
-
-        <section className="panel planner-panel">
-          <div className="planner-header">
-            <h2>Attendance Planner</h2>
-            <label className="target-select">
-              <span>Target</span>
-              <select value={plannerTarget} onChange={(event) => setPlannerTarget(Number(event.target.value))}>
-                <option value={75}>75%</option>
-                <option value={76}>76%</option>
-                <option value={80}>80%</option>
-              </select>
-            </label>
-          </div>
-
-          <div className="planner-list">
-            {subjects.map((subject) => {
-              const upcomingClasses = Number(plannerInputs[subject.id] || 0)
-              const futureAttendance = calculatePercentage(
-                subject.attended + upcomingClasses,
-                subject.total + upcomingClasses,
-              )
-
-              return (
-                <div className="planner-item" key={subject.id}>
-                  <div className="planner-top-row">
-                    <div>
-                      <h3>{subject.name}</h3>
-                      <p>
-                        Current: {subject.attended}/{subject.total} ({calculatePercentage(subject.attended, subject.total).toFixed(2)}%)
-                      </p>
-                    </div>
-                    <div className="planner-stat">
-                      <span>Future attendance</span>
-                      <strong>{futureAttendance.toFixed(2)}%</strong>
-                    </div>
-                  </div>
-
-                  <label className="planner-field">
-                    <span>How many upcoming classes will I attend?</span>
-                    <input
-                      type="number"
-                      min="0"
-                      value={upcomingClasses}
-                      onChange={(event) => handlePlannerInput(subject.id, event.target.value)}
-                    />
-                  </label>
-
-                  <div className="planner-metrics">
-                    <div>
-                      <span>Classes required</span>
-                      <strong>{getClassesRequired(subject.attended, subject.total, plannerTarget)}</strong>
-                    </div>
-                    <div>
-                      <span>Classes can be missed</span>
-                      <strong>{getClassesMissed(subject.attended, subject.total, plannerTarget)}</strong>
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
           </div>
         </section>
 
