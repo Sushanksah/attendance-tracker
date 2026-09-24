@@ -262,6 +262,33 @@ p {
   background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
 }
 
+.metric-card.overall-card.below {
+  border-color: #fecaca;
+  background: linear-gradient(135deg, #fee2e2, #fff1f2);
+}
+
+.metric-card.overall-card.below strong {
+  color: #b91c1c;
+}
+
+.metric-card.overall-card.target {
+  border-color: #fde68a;
+  background: linear-gradient(135deg, #fef3c7, #fffbeb);
+}
+
+.metric-card.overall-card.target strong {
+  color: #a16207;
+}
+
+.metric-card.overall-card.above {
+  border-color: #bbf7d0;
+  background: linear-gradient(135deg, #dcfce7, #f0fdf4);
+}
+
+.metric-card.overall-card.above strong {
+  color: #15803d;
+}
+
 .metric-card span {
   display: block;
   color: #475569;
@@ -771,6 +798,13 @@ p {
   background: #991b1b;
 }
 
+.app-footer {
+  padding: 24px 0 10px;
+  color: #64748b;
+  font-size: 0.78rem;
+  text-align: center;
+}
+
 .subject-form {
   display: grid;
   gap: 16px;
@@ -890,8 +924,15 @@ button:disabled {
 
 .row-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+
+.row-actions button:disabled {
+  cursor: not-allowed;
+  filter: grayscale(0.35);
+  opacity: 0.42;
 }
 
 .summary-list {
@@ -1032,10 +1073,16 @@ tbody tr:hover {
 }
 
 th {
+  background: #f8fbff;
   color: #475569;
   font-size: 0.78rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+
+tbody td:first-child {
+  color: #0f172a;
+  font-weight: 700;
 }
 
 .status-badge {
