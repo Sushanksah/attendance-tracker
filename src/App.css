@@ -588,6 +588,55 @@ p {
   font-size: 0.76rem;
 }
 
+.end-of-day-review {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #dbe7f4;
+}
+
+.end-of-day-review h3 {
+  margin: 0 0 6px;
+  color: #0f172a;
+  font-size: 0.95rem;
+}
+
+.end-of-day-scenarios {
+  display: grid;
+  gap: 8px;
+  max-height: 230px;
+  overflow-y: auto;
+  margin-top: 12px;
+  padding-right: 2px;
+}
+
+.end-of-day-scenario {
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+  background: #f0fdf4;
+}
+
+.end-of-day-scenario.need {
+  border-color: #fecaca;
+  background: #fff1f2;
+}
+
+.end-of-day-scenario strong {
+  color: #166534;
+  font-size: 0.78rem;
+}
+
+.end-of-day-scenario.need strong {
+  color: #b91c1c;
+}
+
+.end-of-day-scenario span {
+  color: #475569;
+  font-size: 0.75rem;
+}
+
 .calendar-events {
   max-height: 360px;
   overflow-y: auto;

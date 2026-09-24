@@ -84,6 +84,12 @@ function getCalendarEventKey(event) {
   return `${event.calendarId || event.calendarName || 'calendar'}-${event.id}`
 }
 
+function getCalendarAttendanceStatus(status) {
+  if (status === 'attended') return 'present'
+  if (status === 'missed') return 'absent'
+  return status
+}
+
 function getLocalDateKey(date) {
   if (!date) return ''
   const year = date.getFullYear()
@@ -995,10 +1001,41 @@ function Dashboard({ session, onLogout }) {
     const secondTime = getCalendarEventDate(second)?.getTime() || 0
     return firstTime - secondTime
   })
-  const todayScenarios = Array.from({ length: todayEvents.length + 1 }, (_, attendedToday) => {
+  const remainingTodayEvents = sortedTodayEvents.filter(
+    (event) => !getCalendarAttendanceStatus(calendarAttendance[getCalendarEventKey(event)]),
+  )
+  const recordedTodayCount = todayEvents.length - remainingTodayEvents.length
+  const dayHasEnded =
+    todayEvents.length > 0 &&
+    todayEvents.every((event) => {
+      const eventEnd = getCalendarEventEndDate(event)
+      return eventEnd ? eventEnd <= currentTime : false
+    })
+  const recordedPresentCount = todayEvents.filter(
+    (event) => getCalendarAttendanceStatus(calendarAttendance[getCalendarEventKey(event)]) === 'present',
+  ).length
+  const recordedAbsentCount = todayEvents.filter(
+    (event) => getCalendarAttendanceStatus(calendarAttendance[getCalendarEventKey(event)]) === 'absent',
+  ).length
+  const endOfDayBaseTotal = Math.max(0, totalClasses - recordedPresentCount - recordedAbsentCount)
+  const endOfDayBaseAttended = Math.max(0, totalAttended - recordedPresentCount)
+  const endOfDayScenarios = Array.from({ length: todayEvents.length + 1 }, (_, attendedToday) => {
+    const projectedAttendance = calculatePercentage(
+      endOfDayBaseAttended + attendedToday,
+      endOfDayBaseTotal + todayEvents.length,
+    )
+    return {
+      attendedToday,
+      missedToday: todayEvents.length - attendedToday,
+      projectedAttendance,
+    }
+  })
+  const todayScenarios = Array.from(
+    { length: remainingTodayEvents.length + 1 },
+    (_, attendedToday) => {
     const projectedAttendance = calculatePercentage(
       totalAttended + attendedToday,
-      totalClasses + todayEvents.length,
+      totalClasses + remainingTodayEvents.length,
     )
     const change = projectedAttendance - overallAttendance
     return {
@@ -1008,18 +1045,25 @@ function Dashboard({ session, onLogout }) {
       decision:
         projectedAttendance >= 75
           ? attendedToday === 0
-            ? 'You can leave all valid classes'
-            : `Attend ${attendedToday} class${attendedToday === 1 ? '' : 'es'}`
+            ? remainingTodayEvents.length === 0
+              ? 'All of today’s classes are recorded'
+              : `Miss all ${remainingTodayEvents.length} remaining class${remainingTodayEvents.length === 1 ? '' : 'es'}`
+            : `Attend ${attendedToday} of ${remainingTodayEvents.length} remaining class${remainingTodayEvents.length === 1 ? '' : 'es'}`
           : attendedToday === 0
-            ? 'Leaving all valid classes goes below 75%'
-            : `Attend ${attendedToday} class${attendedToday === 1 ? '' : 'es'} — still below 75%`,
+            ? remainingTodayEvents.length === 0
+              ? 'Today’s classes are recorded'
+              : `Miss all ${remainingTodayEvents.length} remaining class${remainingTodayEvents.length === 1 ? '' : 'es'} — below 75%`
+            : `Attend ${attendedToday} of ${remainingTodayEvents.length} remaining class${remainingTodayEvents.length === 1 ? '' : 'es'} — still below 75%`,
     }
-  })
+    },
+  )
 
   const renderCalendarEvent = (event, eventIndex, showRecommendation) => {
     const eventDate = getCalendarEventDate(event)
     const eventEndDate = getCalendarEventEndDate(event)
-    const eventStatus = calendarAttendance[getCalendarEventKey(event)]
+    const eventStatus = getCalendarAttendanceStatus(
+      calendarAttendance[getCalendarEventKey(event)],
+    )
     const now = currentTime
     const isCompleted = eventEndDate && eventEndDate <= now
     const isInProgress = eventDate && eventEndDate && eventDate <= now && eventEndDate > now
@@ -1031,15 +1075,22 @@ function Dashboard({ session, onLogout }) {
     const remainingMinutes = isInProgress
       ? Math.max(0, Math.ceil((eventEndDate.getTime() - now.getTime()) / 60000))
       : 0
-    const classesBefore = eventIndex
-    const attendPercentage = calculatePercentage(
-      totalAttended + classesBefore + 1,
-      totalClasses + classesBefore + 1,
-    )
-    const leavePercentage = calculatePercentage(
-      totalAttended + classesBefore,
-      totalClasses + classesBefore + 1,
-    )
+    const classesBefore = sortedTodayEvents
+      .slice(0, eventIndex)
+      .filter((item) => !calendarAttendance[getCalendarEventKey(item)]).length
+    const remainingClassNumber = classesBefore + 1
+    const attendPercentage = eventStatus
+      ? overallAttendance
+      : calculatePercentage(
+          totalAttended + classesBefore + 1,
+          totalClasses + classesBefore + 1,
+        )
+    const leavePercentage = eventStatus
+      ? overallAttendance
+      : calculatePercentage(
+          totalAttended + classesBefore,
+          totalClasses + classesBefore + 1,
+        )
     const attendChange = attendPercentage - overallAttendance
     const leaveChange = leavePercentage - overallAttendance
 
@@ -1089,15 +1140,31 @@ function Dashboard({ session, onLogout }) {
             </div>
           )}
           {showRecommendation && (
-            <div className={`calendar-advice ${leavePercentage >= 75 ? 'safe' : 'need'}`}>
+            <div
+              className={`calendar-advice ${
+                eventStatus
+                  ? eventStatus === 'present'
+                    ? 'safe'
+                    : 'need'
+                  : leavePercentage >= 75
+                    ? 'safe'
+                    : 'need'
+              }`}
+            >
               <strong className="calendar-recommendation">
-                Class {eventIndex + 1} of {todayEvents.length}
+                {eventStatus
+                  ? eventStatus === 'present'
+                    ? 'Already marked present'
+                    : 'Already marked absent'
+                  : `Class ${remainingClassNumber} of ${remainingTodayEvents.length} remaining`}
               </strong>
               <span>
-                Attend: {attendPercentage.toFixed(2)}% ({attendChange >= 0 ? '+' : ''}
-                {attendChange.toFixed(2)} points) · Miss: {leavePercentage.toFixed(2)}% (
-                {leaveChange >= 0 ? '+' : ''}
-                {leaveChange.toFixed(2)} points)
+                {eventStatus
+                  ? `Current overall attendance: ${overallAttendance.toFixed(2)}%`
+                  : `Attend: ${attendPercentage.toFixed(2)}% (${attendChange >= 0 ? '+' : ''}
+                    ${attendChange.toFixed(2)} points) · Miss: ${leavePercentage.toFixed(2)}% (
+                    ${leaveChange >= 0 ? '+' : ''}
+                    ${leaveChange.toFixed(2)} points)`}
               </span>
             </div>
           )}
@@ -1251,7 +1318,10 @@ function Dashboard({ session, onLogout }) {
                 ) : (
                   <>
                     <p className="today-plan-meta">
-                      {todayEvents.length} valid class{todayEvents.length === 1 ? '' : 'es'} · cancelled classes excluded
+                      {recordedTodayCount > 0
+                        ? `${recordedTodayCount} recorded · ${remainingTodayEvents.length} remaining · projections use only remaining classes`
+                        : `${todayEvents.length} valid class${todayEvents.length === 1 ? '' : 'es'}`}
+                      {' · '}cancelled classes excluded
                     </p>
                     <div className="today-scenarios">
                       {todayScenarios.map((scenario) => (
@@ -1271,6 +1341,31 @@ function Dashboard({ session, onLogout }) {
                       ))}
                     </div>
                   </>
+                )}
+                {dayHasEnded && (
+                  <div className="end-of-day-review">
+                    <p className="panel-kicker">End-of-day review</p>
+                    <h3>What today could have looked like</h3>
+                    <p className="today-plan-meta">
+                      Based on {todayEvents.length} completed class{todayEvents.length === 1 ? '' : 'es'}.
+                      This is a review only and does not change your records.
+                    </p>
+                    <div className="end-of-day-scenarios">
+                      {endOfDayScenarios.map((scenario) => (
+                        <div
+                          className={`end-of-day-scenario ${
+                            scenario.projectedAttendance >= 75 ? 'safe' : 'need'
+                          }`}
+                          key={scenario.attendedToday}
+                        >
+                          <strong>
+                            Attend {scenario.attendedToday}, miss {scenario.missedToday}
+                          </strong>
+                          <span>Overall would be {scenario.projectedAttendance.toFixed(2)}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 )}
               </div>
             </div>
