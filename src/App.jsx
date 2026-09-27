@@ -2,12 +2,6 @@ import { useEffect, useState } from 'react'
 import './App.css'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 
-const initialSubjects = [
-  { id: 1, name: 'Business Statistics', total: 12, attended: 8, target: 75 },
-  { id: 2, name: 'Marketing', total: 18, attended: 14, target: 80 },
-  { id: 3, name: 'Computer Science', total: 15, attended: 12, target: 75 },
-]
-
 const emptySubjectForm = {
   name: '',
   total: '',
@@ -258,20 +252,34 @@ const PROFILE_STORAGE_KEY = 'attendance-tracker-profile-v1'
 
 function readStoredSubjects() {
   if (typeof window === 'undefined') {
-    return initialSubjects
+    return []
   }
 
   try {
     const saved = window.localStorage.getItem(STORAGE_KEY)
-    return saved ? JSON.parse(saved) : initialSubjects
+    const parsed = saved ? JSON.parse(saved) : []
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(
+      (subject) =>
+        subject &&
+        typeof subject.name === 'string' &&
+        Number.isFinite(Number(subject.total)) &&
+        Number(subject.total) > 0 &&
+        Number.isFinite(Number(subject.attended)) &&
+        Number(subject.attended) >= 0 &&
+        Number(subject.attended) <= Number(subject.total) &&
+        Number.isFinite(Number(subject.target)) &&
+        Number(subject.target) >= 0 &&
+        Number(subject.target) <= 100,
+    )
   } catch {
-    return initialSubjects
+    return []
   }
 }
 
 async function saveSubjectToSupabase(session, subject, isUpdate = false) {
   if (!supabase || !session?.user?.id) {
-    return null
+    throw new Error('Your session is unavailable. Please sign in again before saving.')
   }
 
   const payload = {
@@ -283,32 +291,76 @@ async function saveSubjectToSupabase(session, subject, isUpdate = false) {
   }
 
   if (isUpdate && subject.id) {
-    const { error } = await supabase.from('subjects').update(payload).eq('id', subject.id)
+    const { data, error } = await supabase
+      .from('subjects')
+      .update(payload)
+      .eq('id', subject.id)
+      .select('id, subject_name, total_classes, attended_classes, target_percentage')
+      .single()
 
     if (error) {
       console.error('Failed to update subject in Supabase:', error)
-      return null
+      throw error
     }
 
-    return subject
+    return {
+      id: data.id,
+      name: data.subject_name,
+      total: Number(data.total_classes),
+      attended: Number(data.attended_classes),
+      target: Number(data.target_percentage),
+    }
   }
 
   const { data, error } = await supabase.from('subjects').insert([payload]).select().single()
 
   if (error) {
     console.error('Failed to save subject to Supabase:', error)
-    return null
+    throw error
   }
 
-  return data
-    ? {
-        id: data.id,
-        name: data.subject_name,
-        total: Number(data.total_classes),
-        attended: Number(data.attended_classes),
-        target: Number(data.target_percentage),
-      }
-    : null
+  if (!data) {
+    throw new Error('The database did not confirm that the subject was saved.')
+  }
+
+  return {
+    id: data.id,
+    name: data.subject_name,
+    total: Number(data.total_classes),
+    attended: Number(data.attended_classes),
+    target: Number(data.target_percentage),
+  }
+}
+
+async function importLocalSubjectsToSupabase(session, localSubjects) {
+  if (!supabase || !session?.user?.id || localSubjects.length === 0) {
+    throw new Error('There are no saved subjects to import.')
+  }
+
+  const payload = localSubjects.map((subject) => ({
+    user_id: session.user.id,
+    subject_name: subject.name.trim(),
+    total_classes: Number(subject.total),
+    attended_classes: Number(subject.attended),
+    target_percentage: Number(subject.target),
+  }))
+  const { data, error } = await supabase
+    .from('subjects')
+    .insert(payload)
+    .select('id, subject_name, total_classes, attended_classes, target_percentage')
+
+  if (error) {
+    console.error('Failed to import browser subjects to Supabase:', error)
+    throw error
+  }
+
+  return data.map((item) => ({
+    id: item.id,
+    name: item.subject_name,
+    total: Number(item.total_classes),
+    attended: Number(item.attended_classes),
+    target: Number(item.target_percentage),
+  }))
 }
 
 async function saveAttendanceLogToSupabase(session, subject, action, notes) {
@@ -334,13 +386,14 @@ async function saveAttendanceLogToSupabase(session, subject, action, notes) {
 
 async function deleteSubjectFromSupabase(session, subjectId) {
   if (!supabase || !session?.user?.id || !subjectId) {
-    return
+    throw new Error('Your session is unavailable. Please sign in again before deleting.')
   }
 
   const { error } = await supabase.from('subjects').delete().eq('id', subjectId)
 
   if (error) {
     console.error('Failed to delete subject from Supabase:', error)
+    throw error
   }
 }
 
@@ -444,9 +497,9 @@ async function loadProfileFromSupabase(session, setProfile) {
   }
 }
 
-async function loadSubjectsFromSupabase(session, setSubjects) {
+async function loadSubjectsFromSupabase(session) {
   if (!supabase || !session?.user?.id) {
-    return
+    throw new Error('Supabase is not configured for this deployment.')
   }
 
   const { data, error } = await supabase
@@ -457,7 +510,7 @@ async function loadSubjectsFromSupabase(session, setSubjects) {
 
   if (error) {
     console.error('Could not load subjects from Supabase:', error)
-    return
+    throw error
   }
 
   const mapped = (data || []).map((item) => ({
@@ -468,7 +521,7 @@ async function loadSubjectsFromSupabase(session, setSubjects) {
     target: Number(item.target_percentage),
   }))
 
-  setSubjects(mapped)
+  return mapped
 }
 
 function Dashboard({ session, onLogout }) {
@@ -506,7 +559,12 @@ function Dashboard({ session, onLogout }) {
       return {}
     }
   })
-  const [subjects, setSubjects] = useState(() => readStoredSubjects())
+  const [subjects, setSubjects] = useState([])
+  const [subjectsLoading, setSubjectsLoading] = useState(true)
+  const [subjectsSyncError, setSubjectsSyncError] = useState('')
+  const [localSubjectsNeedImport, setLocalSubjectsNeedImport] = useState(false)
+  const [subjectsImporting, setSubjectsImporting] = useState(false)
+  const [subjectLoadAttempt, setSubjectLoadAttempt] = useState(0)
   const [form, setForm] = useState(emptySubjectForm)
   const [editingSubjectId, setEditingSubjectId] = useState(null)
   const [error, setError] = useState('')
@@ -535,19 +593,43 @@ function Dashboard({ session, onLogout }) {
   }, [profile.studentName, session])
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && !subjectsLoading && !subjectsSyncError) {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(subjects))
     }
-  }, [subjects])
+  }, [subjects, subjectsLoading, subjectsSyncError])
 
   useEffect(() => {
-    if (!session?.user?.id) {
-      return
-    }
+    if (!session?.user?.id) return undefined
 
+    let active = true
     loadProfileFromSupabase(session, setProfile)
-    loadSubjectsFromSupabase(session, setSubjects)
-  }, [session])
+    loadSubjectsFromSupabase(session)
+      .then((remoteSubjects) => {
+        if (!active) return
+
+        if (remoteSubjects.length > 0) {
+          setSubjects(remoteSubjects)
+          setLocalSubjectsNeedImport(false)
+        } else {
+          const cachedSubjects = readStoredSubjects()
+          setSubjects(cachedSubjects)
+          setLocalSubjectsNeedImport(cachedSubjects.length > 0)
+        }
+      })
+      .catch((loadError) => {
+        if (!active) return
+        setSubjectsSyncError(
+          `Could not load subjects from the database: ${loadError.message || 'unknown error'}. Check that Vercel uses the same Supabase project and that the database schema is installed.`,
+        )
+      })
+      .finally(() => {
+        if (active) setSubjectsLoading(false)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [session, subjectLoadAttempt])
 
   const handleProfilePhotoChange = async (event) => {
     const file = event.target.files?.[0]
@@ -806,6 +888,11 @@ function Dashboard({ session, onLogout }) {
     event.preventDefault()
     setError('')
 
+    if (localSubjectsNeedImport) {
+      setError('Import the saved browser subjects to your account before making changes.')
+      return
+    }
+
     const name = form.name.trim()
     const total = Number(form.total)
     const attended = Number(form.attended)
@@ -837,29 +924,37 @@ function Dashboard({ session, onLogout }) {
     }
 
     if (editingSubjectId) {
-      const updatedSubjects = subjects.map((subject) => {
-        if (subject.id !== editingSubjectId) {
-          return subject
-        }
-
-        return {
-          ...subject,
-          name,
-          total,
-          attended,
-          target,
-        }
-      })
-
-      setSubjects(updatedSubjects)
-
-      if (session?.user?.id && supabase) {
-        const updatedSubject = updatedSubjects.find((subject) => subject.id === editingSubjectId)
-        saveSubjectToSupabase(session, updatedSubject, true)
+      if (localSubjectsNeedImport) {
+        setError('Import the saved browser subjects to your account before editing them.')
+        return
       }
 
-      setEditingSubjectId(null)
-      setForm(emptySubjectForm)
+      const currentSubject = subjects.find((subject) => subject.id === editingSubjectId)
+      if (!currentSubject) {
+        setError('Could not find the subject to update. Reload your subjects and try again.')
+        return
+      }
+
+      const updatedSubject = {
+        ...currentSubject,
+        name,
+        total,
+        attended,
+        target,
+      }
+
+      try {
+        const savedSubject = await saveSubjectToSupabase(session, updatedSubject, true)
+        setSubjects((current) =>
+          current.map((subject) =>
+            subject.id === editingSubjectId ? savedSubject : subject,
+          ),
+        )
+        setEditingSubjectId(null)
+        setForm(emptySubjectForm)
+      } catch (saveError) {
+        setError(`Could not save this subject: ${saveError.message || 'unknown error'}`)
+      }
       return
     }
 
@@ -871,20 +966,38 @@ function Dashboard({ session, onLogout }) {
       target,
     }
 
-    if (session?.user?.id && supabase) {
+    try {
       const savedSubject = await saveSubjectToSupabase(session, newSubject)
-      if (savedSubject) {
-        newSubject.id = savedSubject.id
-      }
+      setSubjects((current) => [...current, savedSubject])
+      setForm(emptySubjectForm)
+    } catch (saveError) {
+      setError(`Could not save this subject: ${saveError.message || 'unknown error'}`)
     }
+  }
 
-    const nextSubjects = [...subjects, newSubject]
-    setSubjects(nextSubjects)
-    setForm(emptySubjectForm)
+  const handleImportLocalSubjects = async () => {
+    setSubjectsImporting(true)
+    setError('')
+
+    try {
+      const importedSubjects = await importLocalSubjectsToSupabase(session, subjects)
+      setSubjects(importedSubjects)
+      setLocalSubjectsNeedImport(false)
+      setError('')
+    } catch (importError) {
+      setError(`Could not import saved subjects: ${importError.message || 'unknown error'}`)
+    } finally {
+      setSubjectsImporting(false)
+    }
   }
 
   const handleMarkAttendance = async (subjectId, attended) => {
     setError('')
+
+    if (localSubjectsNeedImport) {
+      setError('Import the saved browser subjects to your account before marking attendance.')
+      return false
+    }
 
     const subject = subjects.find((item) => item.id === subjectId)
     if (!subject) {
@@ -924,23 +1037,20 @@ function Dashboard({ session, onLogout }) {
       attended: Number(subject.attended) + (attended ? 1 : 0),
     }
 
-    setSubjects((current) =>
-      current.map((item) => (item.id === subjectId ? updatedSubject : item)),
-    )
-
-    if (session?.user?.id && supabase) {
+    try {
       const savedSubject = await saveSubjectToSupabase(session, updatedSubject, true)
-      if (!savedSubject) {
-        setError('Attendance changed locally, but could not be saved to Supabase.')
-        return false
-      }
-
+      setSubjects((current) =>
+        current.map((item) => (item.id === subjectId ? savedSubject : item)),
+      )
       await saveAttendanceLogToSupabase(
         session,
-        updatedSubject,
+        savedSubject,
         'update',
         attended ? 'Marked present' : 'Marked absent',
       )
+    } catch (saveError) {
+      setError(`Attendance was not changed because it could not be saved: ${saveError.message || 'unknown error'}`)
+      return false
     }
 
     setCalendarAttendance((current) => {
@@ -973,18 +1083,26 @@ function Dashboard({ session, onLogout }) {
     setDeleteConfirmation('')
   }
 
-  const handleDeleteSubject = () => {
+  const handleDeleteSubject = async () => {
     if (!subjectPendingDelete || deleteConfirmation !== 'DELETE') {
+      return
+    }
+    if (localSubjectsNeedImport) {
+      setError('Import the saved browser subjects to your account before deleting them.')
       return
     }
 
     const subjectId = subjectPendingDelete.id
+    setError('')
+    try {
+      await deleteSubjectFromSupabase(session, subjectId)
+    } catch (deleteError) {
+      setError(`Could not delete this subject: ${deleteError.message || 'unknown error'}`)
+      return
+    }
+
     const filtered = subjects.filter((subject) => subject.id !== subjectId)
     setSubjects(filtered)
-
-    if (session?.user?.id && supabase) {
-      deleteSubjectFromSupabase(session, subjectId)
-    }
 
     if (editingSubjectId === subjectId) {
       setEditingSubjectId(null)
@@ -1319,7 +1437,20 @@ function Dashboard({ session, onLogout }) {
             </button>
           </div>
 
-          {calendarError && <div className="feedback error">{calendarError}</div>}
+          {calendarError && (
+            <div className="feedback error" role="alert">
+              {calendarError}
+              <p className="oauth-origin-help">
+                If Google showed <code>origin_mismatch</code>, add this exact origin under
+                Google Cloud → OAuth client → Authorized JavaScript origins:{' '}
+                <code>{window.location.origin}</code>
+                <br />
+                This app is using OAuth client ID starting with{' '}
+                <code>{googleClientId ? googleClientId.slice(0, 18) : 'not configured'}</code>.
+                Make sure it matches the client ID on the Google Cloud page you edited.
+              </p>
+            </div>
+          )}
 
           {calendarConnected && calendarEvents.length === 0 && (
             <div className="info-box">
@@ -1412,6 +1543,47 @@ function Dashboard({ session, onLogout }) {
           )}
 
         </section>
+
+        {subjectsLoading && (
+          <div className="info-box">
+            <p>Loading your subjects from your account...</p>
+          </div>
+        )}
+        {subjectsSyncError && (
+          <div className="feedback error" role="alert">
+            <p>{subjectsSyncError}</p>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => {
+                setSubjectsSyncError('')
+                setSubjectsLoading(true)
+                setSubjectLoadAttempt((attempt) => attempt + 1)
+              }}
+              disabled={subjectsLoading}
+            >
+              {subjectsLoading ? 'Retrying...' : 'Retry loading'}
+            </button>
+          </div>
+        )}
+        {localSubjectsNeedImport && (
+          <div className="info-box">
+            <h3>Saved subjects found in this browser</h3>
+            <p>
+              Your account has no subjects in the database yet, but this browser has {subjects.length}{' '}
+              saved subject{subjects.length === 1 ? '' : 's'}. Import them only if they belong to the
+              account you are signed into.
+            </p>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={handleImportLocalSubjects}
+              disabled={subjectsImporting}
+            >
+              {subjectsImporting ? 'Importing subjects...' : 'Import saved subjects to my account'}
+            </button>
+          </div>
+        )}
 
         <section className="content-grid">
           <div className="panel">

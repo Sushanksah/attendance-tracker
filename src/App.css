@@ -1236,6 +1236,18 @@ tbody td:first-child {
   border: 1px solid #fecaca;
 }
 
+.oauth-origin-help {
+  margin: 8px 0 0;
+  line-height: 1.6;
+}
+
+.oauth-origin-help code {
+  overflow-wrap: anywhere;
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: rgb(255 255 255 / 75%);
+}
+
 .feedback.success {
   background: #ecfdf5;
   color: #166534;
