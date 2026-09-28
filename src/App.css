@@ -64,6 +64,45 @@ p {
   box-shadow: 0 18px 45px rgb(15 23 42 / 8%);
 }
 
+.session-loading {
+  text-align: center;
+}
+
+.session-loading > p:last-of-type {
+  margin: 14px 0 0;
+  color: #64748b;
+  line-height: 1.55;
+}
+
+.session-loading-bar {
+  position: relative;
+  height: 5px;
+  overflow: hidden;
+  margin-top: 24px;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.session-loading-bar::after {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 42%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2563eb, #38bdf8);
+  content: '';
+  animation: session-loading 1.3s ease-in-out infinite alternate;
+}
+
+@keyframes session-loading {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(140%);
+  }
+}
+
 .dashboard-shell {
   display: block;
   padding: clamp(18px, 3vw, 36px);

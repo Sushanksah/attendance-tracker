@@ -2307,6 +2307,7 @@ function AuthScreen() {
   const [mode, setMode] = useState('login')
   const [form, setForm] = useState(emptyAuthForm)
   const [session, setSession] = useState(null)
+  const [authLoading, setAuthLoading] = useState(Boolean(supabase))
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
@@ -2316,19 +2317,32 @@ function AuthScreen() {
 
     let active = true
 
-    supabase.auth.getSession().then(({ data }) => {
-      if (active) {
-        setSession(data.session)
-      }
-    })
-
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, newSession) => {
       if (active) {
         setSession(newSession)
+        setAuthLoading(false)
       }
     })
+
+    supabase.auth
+      .getSession()
+      .then(({ data, error: sessionError }) => {
+        if (!active) return
+        if (sessionError) {
+          setError(`Could not restore your sign-in session: ${sessionError.message}`)
+        }
+        setSession(data.session)
+        setAuthLoading(false)
+      })
+      .catch((sessionError) => {
+        if (!active) return
+        setError(
+          `Could not restore your sign-in session: ${sessionError.message || 'Please check your connection and reload.'}`,
+        )
+        setAuthLoading(false)
+      })
 
     return () => {
       active = false
@@ -2354,6 +2368,19 @@ function AuthScreen() {
 
   if (session) {
     return <Dashboard session={session} onLogout={handleLogout} />
+  }
+
+  if (authLoading) {
+    return (
+      <main className="app-shell auth-shell">
+        <section className="auth-card session-loading" aria-live="polite">
+          <p className="eyebrow">Secure sign-in</p>
+          <h1>Restoring your session</h1>
+          <p>Your private attendance dashboard will open in a moment.</p>
+          <div className="session-loading-bar" aria-hidden="true" />
+        </section>
+      </main>
+    )
   }
 
   const updateField = (event) => {

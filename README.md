@@ -68,6 +68,10 @@ Subjects are stored in Supabase, not in Vercel. In Vercel, open **Project → Se
 
 Add the variables to the **Production** environment (and Preview too if you use preview deployments), then redeploy. The database schema and RLS policies in `supabase-schema.sql` must also have been applied to that same Supabase project. Sign into the same Attendance Tracker account on both sites; Google Calendar authorization is separate from the app's Supabase account.
 
+### Sign-in persistence
+
+Supabase keeps the sign-in session in browser storage and refreshes it automatically. Sign in once on each browser/device; another phone or browser cannot safely inherit the session from your computer. On later visits, use the same exact site URL (for example, the production Vercel domain), because each hostname has separate browser storage. Private/incognito browsing, clearing site data, or browser privacy settings that block storage can require signing in again. On page load, the app restores the saved session before showing the login form.
+
 If a previous build saved subjects only in this browser, and the database has no subjects for the signed-in account, the dashboard offers an explicit button to import those browser-saved subjects into Supabase. Browser storage is specific to a site origin, so subjects saved at `localhost` are not automatically available at a Vercel URL. Open the old site in the same browser to retrieve its local data; otherwise those local-only subjects must be entered again.
 
 ## Publishing updates through GitHub
