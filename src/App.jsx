@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import writeExcelFile from 'write-excel-file/browser'
 import './App.css'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 
@@ -184,32 +185,6 @@ function getFutureAttendance(attended, total, futureAttended, futureMissed) {
   }
 
   return calculatePercentage(finalAttended, finalTotal)
-}
-
-function getOverallTargetPlan(attended, total, targetPercent = 75) {
-  if (!Number(total) || Number(total) <= 0) {
-    return {
-      type: 'neutral',
-      text: 'Add your subjects to calculate your overall target plan.',
-    }
-  }
-
-  const percentage = calculatePercentage(attended, total)
-  const target = Number(targetPercent)
-
-  if (percentage >= target) {
-    const missed = getClassesMissed(attended, total, target)
-    return {
-      type: 'safe',
-      text: `You can miss ${missed} class${missed === 1 ? '' : 'es'} overall while staying above ${target}%.`,
-    }
-  }
-
-  const required = getClassesRequired(attended, total, target)
-  return {
-    type: 'warning',
-    text: `You need to attend ${required} more class${required === 1 ? '' : 'es'} overall to reach ${target}%.`,
-  }
 }
 
 function getOverallPlanDetails(attended, total, targetPercent = 75) {
@@ -541,6 +516,7 @@ function Dashboard({ session, onLogout }) {
   const [profileError, setProfileError] = useState('')
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileEditing, setProfileEditing] = useState(false)
+  const [profileBeforeEdit, setProfileBeforeEdit] = useState(null)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   const [subjectPendingDelete, setSubjectPendingDelete] = useState(null)
   const [deleteConfirmation, setDeleteConfirmation] = useState('')
@@ -564,16 +540,18 @@ function Dashboard({ session, onLogout }) {
   const [subjectsSyncError, setSubjectsSyncError] = useState('')
   const [localSubjectsNeedImport, setLocalSubjectsNeedImport] = useState(false)
   const [subjectsImporting, setSubjectsImporting] = useState(false)
+  const [subjectsExporting, setSubjectsExporting] = useState(false)
   const [subjectLoadAttempt, setSubjectLoadAttempt] = useState(0)
+  const [subjectFormOpen, setSubjectFormOpen] = useState(false)
   const [form, setForm] = useState(emptySubjectForm)
   const [editingSubjectId, setEditingSubjectId] = useState(null)
   const [error, setError] = useState('')
   const [whatIf, setWhatIf] = useState({
-    attended: 160,
-    total: 215,
-    futureAttended: 10,
-    futureMissed: 2,
-    target: 75,
+    attended: '160',
+    total: '215',
+    futureAttended: '10',
+    futureMissed: '2',
+    target: '75',
   })
   const [currentTime, setCurrentTime] = useState(() => new Date())
 
@@ -587,10 +565,10 @@ function Dashboard({ session, onLogout }) {
       window.localStorage.setItem(PROFILE_STORAGE_KEY, profile.studentName)
     }
 
-    if (session?.user?.id && profile.studentName) {
+    if (session?.user?.id && profile.studentName && !profileEditing) {
       saveProfileToSupabase(session, profile.studentName)
     }
-  }, [profile.studentName, session])
+  }, [profile.studentName, profileEditing, session])
 
   useEffect(() => {
     if (typeof window !== 'undefined' && !subjectsLoading && !subjectsSyncError) {
@@ -643,8 +621,7 @@ function Dashboard({ session, onLogout }) {
       const avatarUrl = await uploadProfilePhoto(session, file)
       if (!avatarUrl) throw new Error('Profile photo upload is unavailable.')
       setProfile((current) => ({ ...current, avatarUrl }))
-      await saveExtendedProfileToSupabase(session, { ...profile, avatarUrl })
-      setProfileMessage('Profile photo updated.')
+      setProfileMessage('Photo uploaded. Save your profile to keep this change.')
     } catch (uploadError) {
       setProfileError(uploadError.message || 'Could not update profile photo.')
     } finally {
@@ -658,19 +635,27 @@ function Dashboard({ session, onLogout }) {
     setProfileError('')
     setProfileMessage('')
 
+    if (!profile.studentName.trim()) {
+      setProfileError('Please enter your name.')
+      return
+    }
+
     if (profile.universityEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(profile.universityEmail)) {
       setProfileError('Please enter a valid university email address.')
       return
     }
 
     setProfileSaving(true)
-    const saved = await saveExtendedProfileToSupabase(session, profile)
-    setProfileSaving(false)
-    if (saved) {
+    try {
+      const saved = await saveExtendedProfileToSupabase(session, profile)
+      if (!saved) throw new Error('Profile details could not be saved. Please try again.')
       setProfileMessage('Profile details saved.')
+      setProfileBeforeEdit(null)
       setProfileEditing(false)
-    } else {
-      setProfileMessage('Profile details could not be saved.')
+    } catch (saveError) {
+      setProfileError(saveError.message || 'Profile details could not be saved.')
+    } finally {
+      setProfileSaving(false)
     }
   }
 
@@ -685,8 +670,43 @@ function Dashboard({ session, onLogout }) {
   const targetPercentage = subjects.length
     ? subjects.reduce((sum, subject) => sum + Number(subject.target), 0) / subjects.length
     : 0
-  const overallTargetPlan = getOverallTargetPlan(totalAttended, totalClasses, 75)
   const overallPlanDetails = getOverallPlanDetails(totalAttended, totalClasses, 75)
+  const whatIfNumbers = Object.fromEntries(
+    Object.entries(whatIf).map(([key, value]) => [key, Number(value)]),
+  )
+  const whatIfFieldsValid =
+    Object.values(whatIf).every((value) => /^\d+$/.test(value)) &&
+    whatIfNumbers.attended >= 0 &&
+    whatIfNumbers.total > 0 &&
+    whatIfNumbers.attended <= whatIfNumbers.total &&
+    whatIfNumbers.futureAttended >= 0 &&
+    whatIfNumbers.futureMissed >= 0 &&
+    whatIfNumbers.target >= 0 &&
+    whatIfNumbers.target <= 100
+
+  const closeProfileEditor = (restoreChanges = true) => {
+    if (restoreChanges && profileBeforeEdit) setProfile(profileBeforeEdit)
+    setProfileBeforeEdit(null)
+    setProfileEditing(false)
+    setProfileError('')
+    setProfileMessage('')
+  }
+
+  useEffect(() => {
+    if (!profileEditing) return undefined
+
+    const handleEscape = (event) => {
+      if (event.key === 'Escape' && !profileSaving) {
+        if (profileBeforeEdit) setProfile(profileBeforeEdit)
+        setProfileBeforeEdit(null)
+        setProfileEditing(false)
+        setProfileError('')
+        setProfileMessage('')
+      }
+    }
+    window.addEventListener('keydown', handleEscape)
+    return () => window.removeEventListener('keydown', handleEscape)
+  }, [profileEditing, profileSaving, profileBeforeEdit])
 
   const loadCalendarEvents = async (accessToken) => {
     const { timeMin, timeMax } = getCalendarDateRange()
@@ -903,12 +923,12 @@ function Dashboard({ session, onLogout }) {
       return
     }
 
-    if (!Number.isFinite(total) || total <= 0) {
+    if (!form.total.trim() || !/^\d+$/.test(form.total) || !Number.isFinite(total) || total <= 0) {
       setError('Total classes must be greater than 0.')
       return
     }
 
-    if (!Number.isFinite(attended) || attended < 0) {
+    if (!form.attended.trim() || !/^\d+$/.test(form.attended) || !Number.isFinite(attended) || attended < 0) {
       setError('Attended classes cannot be negative.')
       return
     }
@@ -918,7 +938,13 @@ function Dashboard({ session, onLogout }) {
       return
     }
 
-    if (!Number.isFinite(target) || target < 0 || target > 100) {
+    if (
+      !form.target.trim() ||
+      !/^\d+(\.\d+)?$/.test(form.target) ||
+      !Number.isFinite(target) ||
+      target < 0 ||
+      target > 100
+    ) {
       setError('Target percentage must be between 0 and 100.')
       return
     }
@@ -952,6 +978,7 @@ function Dashboard({ session, onLogout }) {
         )
         setEditingSubjectId(null)
         setForm(emptySubjectForm)
+        setSubjectFormOpen(false)
       } catch (saveError) {
         setError(`Could not save this subject: ${saveError.message || 'unknown error'}`)
       }
@@ -970,6 +997,7 @@ function Dashboard({ session, onLogout }) {
       const savedSubject = await saveSubjectToSupabase(session, newSubject)
       setSubjects((current) => [...current, savedSubject])
       setForm(emptySubjectForm)
+      setSubjectFormOpen(false)
     } catch (saveError) {
       setError(`Could not save this subject: ${saveError.message || 'unknown error'}`)
     }
@@ -1070,12 +1098,151 @@ function Dashboard({ session, onLogout }) {
 
   const handleEditSubject = (subject) => {
     setEditingSubjectId(subject.id)
+    setSubjectFormOpen(true)
     setForm({
       name: subject.name,
       total: String(subject.total),
       attended: String(subject.attended),
       target: String(subject.target),
     })
+  }
+
+  const closeSubjectForm = () => {
+    setSubjectFormOpen(false)
+    setEditingSubjectId(null)
+    setForm(emptySubjectForm)
+    setError('')
+  }
+
+  const handleDownloadSubjectsExcel = async () => {
+    const exportDate = new Date()
+    const studentSlug = (profile.studentName || 'student')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+    setSubjectsExporting(true)
+    setError('')
+
+    try {
+      const navy = '#173B70'
+      const blue = '#2563EB'
+      const gray = '#334155'
+      const white = '#FFFFFF'
+      const labelCell = (value) => ({
+        value,
+        fontWeight: 'bold',
+        textColor: gray,
+        backgroundColor: '#EAF1FA',
+      })
+      const textCell = (value) => ({
+        value: String(value ?? ''),
+        type: String,
+        textColor: '#0F172A',
+      })
+      const rows = [
+        [
+          {
+            value: 'ATTENDANCE TRACKER',
+            columnSpan: 5,
+            fontWeight: 'bold',
+            fontSize: 20,
+            textColor: white,
+            backgroundColor: navy,
+            height: 38,
+          },
+          null,
+          null,
+          null,
+          null,
+        ],
+        [],
+        [
+          labelCell('Student name'),
+          textCell(profile.studentName || 'Not provided'),
+          labelCell('PRN'),
+          { ...textCell(profile.prnNumber || 'Not provided'), format: '@' },
+        ],
+        [
+          labelCell('Export date'),
+          textCell(exportDate.toLocaleDateString()),
+          labelCell('Overall attendance'),
+          {
+            value: overallAttendance / 100,
+            format: '0.00%',
+            fontWeight: 'bold',
+            fontSize: 13,
+            textColor: overallAttendance >= 75 ? '#166534' : '#B91C1C',
+            backgroundColor: overallAttendance >= 75 ? '#DCFCE7' : '#FEE2E2',
+          },
+        ],
+        [
+          labelCell('Attended classes'),
+          { value: totalAttended, format: '0' },
+          labelCell('Total classes'),
+          { value: totalClasses, format: '0' },
+        ],
+        [],
+        [
+          'Subject',
+          'Attended classes',
+          'Total classes',
+          'Current attendance',
+          'Status',
+        ].map((value) => ({
+          value,
+          fontWeight: 'bold',
+          fontSize: 11,
+          textColor: white,
+          backgroundColor: blue,
+          height: 30,
+          wrap: true,
+        })),
+      ]
+
+      subjects.forEach((subject, index) => {
+        const attendance = calculatePercentage(subject.attended, subject.total)
+        const status = getStatusText(attendance, subject.target)
+        const color =
+          status === 'Safe'
+            ? { textColor: '#166534', backgroundColor: '#DCFCE7' }
+            : status === 'Warning'
+              ? { textColor: '#92400E', backgroundColor: '#FEF3C7' }
+              : { textColor: '#B91C1C', backgroundColor: '#FEE2E2' }
+        const stripe = index % 2 === 1 ? { backgroundColor: '#F8FAFC' } : {}
+
+        rows.push([
+          { ...textCell(subject.name), ...stripe },
+          { value: subject.attended, format: '0', ...stripe },
+          { value: subject.total, format: '0', ...stripe },
+          {
+            value: attendance / 100,
+            format: '0.00%',
+            fontWeight: 'bold',
+            ...color,
+          },
+          { value: status, fontWeight: 'bold', ...color },
+        ])
+      })
+
+      const workbook = await writeExcelFile(rows, {
+        columns: [{ width: 34 }, { width: 20 }, { width: 18 }, { width: 24 }, { width: 20 }],
+      })
+      const file = await workbook.toBlob()
+      const url = URL.createObjectURL(file)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `attendance-${studentSlug || 'student'}-${getLocalDateKey(exportDate)}.xlsx`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 0)
+    } catch (exportError) {
+      console.error('Failed to export attendance workbook:', exportError)
+      setError(`Could not export the attendance workbook: ${exportError.message || 'unknown error'}`)
+    } finally {
+      setSubjectsExporting(false)
+    }
   }
 
   const requestDeleteSubject = (subject) => {
@@ -1366,6 +1533,7 @@ function Dashboard({ session, onLogout }) {
                 <button
                   type="button"
                   onClick={() => {
+                    setProfileBeforeEdit(profile)
                     setProfileEditing(true)
                     setProfileMenuOpen(false)
                     setProfileMessage('')
@@ -1585,84 +1753,108 @@ function Dashboard({ session, onLogout }) {
           </div>
         )}
 
-        <section className="content-grid">
-          <div className="panel">
-            <h2>Add subject</h2>
-
-            <form onSubmit={handleAddSubject} className="subject-form">
-              <label>
-                <span>Subject name</span>
-                <input
-                  type="text"
-                  name="name"
-                  value={form.name}
-                  onChange={handleSubjectInput}
-                  placeholder="Business Statistics"
-                />
-              </label>
-
-              <div className="two-column">
-                <label>
-                  <span>Total classes</span>
-                  <input
-                    type="number"
-                    name="total"
-                    min="1"
-                    value={form.total}
-                    onChange={handleSubjectInput}
-                    placeholder="12"
-                  />
-                </label>
-
-                <label>
-                  <span>Attended classes</span>
-                  <input
-                    type="number"
-                    name="attended"
-                    min="0"
-                    value={form.attended}
-                    onChange={handleSubjectInput}
-                    placeholder="8"
-                  />
-                </label>
+        {subjectFormOpen && (
+          <div
+            className="profile-modal-backdrop subject-modal-backdrop"
+            role="presentation"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) closeSubjectForm()
+            }}
+          >
+            <section
+              className="profile-modal subject-modal"
+              id="subject-form-panel"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="subject-modal-title"
+            >
+              <div className="profile-modal-header">
+                <div>
+                  <p className="panel-kicker">{editingSubjectId ? 'Update details' : 'New subject'}</p>
+                  <h2 id="subject-modal-title">{editingSubjectId ? 'Edit subject' : 'Add a subject'}</h2>
+                  <p>Enter your class totals and target. Attendance percentage is calculated automatically.</p>
+                </div>
+                <button
+                  type="button"
+                  className="profile-modal-close"
+                  aria-label="Close subject form"
+                  onClick={closeSubjectForm}
+                >
+                  ×
+                </button>
               </div>
 
-              <label>
-                <span>Target percentage</span>
-                <input
-                  type="number"
-                  name="target"
-                  min="0"
-                  max="100"
-                  value={form.target}
-                  onChange={handleSubjectInput}
-                  placeholder="75"
-                />
-              </label>
+              <form onSubmit={handleAddSubject} className="subject-form subject-modal-form">
+                <label>
+                  <span>Subject name</span>
+                  <input
+                    type="text"
+                    name="name"
+                    value={form.name}
+                    onChange={handleSubjectInput}
+                    placeholder="Business Statistics"
+                    autoFocus
+                  />
+                </label>
 
-              {error && <div className="feedback error">{error}</div>}
+                <div className="two-column">
+                  <label>
+                    <span>Total classes</span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      name="total"
+                      value={form.total}
+                      onChange={handleSubjectInput}
+                      placeholder="12"
+                    />
+                  </label>
 
-              <div className="form-actions">
-                <button type="submit" className="primary-button">
-                  {editingSubjectId ? 'Update subject' : 'Add subject'}
-                </button>
+                  <label>
+                    <span>Attended classes</span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      name="attended"
+                      value={form.attended}
+                      onChange={handleSubjectInput}
+                      placeholder="8"
+                    />
+                  </label>
+                </div>
 
-                {editingSubjectId && (
+                <label>
+                  <span>Target percentage</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    name="target"
+                    value={form.target}
+                    onChange={handleSubjectInput}
+                    placeholder="75"
+                  />
+                </label>
+
+                {error && <div className="feedback error">{error}</div>}
+
+                <div className="form-actions subject-modal-actions">
+                  <button type="submit" className="primary-button">
+                    {editingSubjectId ? 'Update subject' : 'Save subject'}
+                  </button>
                   <button
                     type="button"
                     className="secondary-button button-ghost"
-                    onClick={() => {
-                      setEditingSubjectId(null)
-                      setForm(emptySubjectForm)
-                    }}
+                    onClick={closeSubjectForm}
                   >
                     Cancel
                   </button>
-                )}
-              </div>
-            </form>
+                </div>
+              </form>
+            </section>
           </div>
+        )}
 
+        <section className="content-grid plan-grid">
           <div className="panel plan-ring-panel">
             <div className="panel-heading-row">
               <div>
@@ -1691,108 +1883,47 @@ function Dashboard({ session, onLogout }) {
           </div>
         </section>
 
-        {profileEditing && (
-        <section className="content-grid profile-edit-grid">
-          <div className="panel">
-            <h2>Profile</h2>
-            <div className="profile-editor">
-            <div className="avatar-preview">
-              {profile.avatarUrl ? (
-                <img src={profile.avatarUrl} alt="Profile" />
-              ) : (
-                <span>{profile.studentName.charAt(0).toUpperCase()}</span>
-              )}
-            </div>
-            <label className={`small-button upload-button ${!profileEditing ? 'disabled' : ''}`}>
-              {profileSaving ? 'Uploading...' : 'Upload profile photo'}
-              <input
-                type="file"
-                accept="image/png,image/jpeg,image/webp"
-                onChange={handleProfilePhotoChange}
-                disabled={profileSaving || !profileEditing}
-              />
-            </label>
-            </div>
-            <form className="profile-form" onSubmit={handleProfileSave}>
-            <label>
-              <span>Student name</span>
-              <input
-                type="text"
-                value={profile.studentName}
-                disabled={!profileEditing}
-                onChange={(event) =>
-                  setProfile((current) => ({ ...current, studentName: event.target.value }))
-                }
-              />
-            </label>
-            <label>
-              <span>PRN number</span>
-              <input
-                type="text"
-                value={profile.prnNumber}
-                disabled={!profileEditing}
-                onChange={(event) =>
-                  setProfile((current) => ({ ...current, prnNumber: event.target.value }))
-                }
-                placeholder="Enter your PRN"
-              />
-            </label>
-            <label>
-              <span>University email (optional)</span>
-              <input
-                type="email"
-                value={profile.universityEmail}
-                disabled={!profileEditing}
-                onChange={(event) =>
-                  setProfile((current) => ({ ...current, universityEmail: event.target.value }))
-                }
-                placeholder="student@university.ac.in"
-              />
-            </label>
-            {profileError && <div className="feedback error">{profileError}</div>}
-            {profileMessage && <div className="feedback success">{profileMessage}</div>}
-            {profileEditing && (
-              <div className="form-actions">
-                <button type="submit" className="primary-button" disabled={profileSaving}>
-                  {profileSaving ? 'Saving...' : 'Save profile'}
-                </button>
-                <button
-                  type="button"
-                  className="secondary-button button-ghost"
-                  onClick={() => {
-                    setProfileEditing(false)
-                    setProfileError('')
-                    setProfileMessage('')
-                  }}
-                >
-                  Cancel
-                </button>
-              </div>
-            )}
-            </form>
-            <div className="summary-list">
-              <div>
-                <span>Overall attendance</span>
-                <strong>{overallAttendance.toFixed(2)}%</strong>
-              </div>
-              <div>
-                <span>Overall target plan</span>
-                <strong>{overallTargetPlan.text}</strong>
-              </div>
-              <div>
-                <span>Subjects</span>
-                <strong>{subjects.length}</strong>
-              </div>
-            </div>
+        {error && !subjectFormOpen && (
+          <div className="feedback error subject-action-error" role="alert">
+            {error}
           </div>
-        </section>
         )}
 
         <section className="panel table-panel">
-          <h2>Subject table</h2>
-          <p className="section-help">
-            After each class, click Present or Absent. The total and attended counts will update automatically.
-          </p>
+          <div className="subject-table-heading">
+            <div>
+              <p className="panel-kicker">Your attendance records</p>
+              <h2>Subject table</h2>
+              <p className="section-help">
+                Mark attendance from scheduled classes, edit subject details, or export your report.
+              </p>
+            </div>
+            <div className="subject-table-actions">
+              <button
+                type="button"
+                className="secondary-button export-button"
+                onClick={handleDownloadSubjectsExcel}
+                disabled={subjects.length === 0 || subjectsExporting}
+                title={subjects.length === 0 ? 'Add a subject before exporting' : 'Download a formatted Excel attendance report'}
+              >
+                {subjectsExporting ? 'Preparing Excel...' : 'Download Excel'}
+              </button>
+              <button
+                type="button"
+                className="primary-button add-subject-button"
+                aria-expanded={subjectFormOpen}
+                aria-controls="subject-form-panel"
+                onClick={() => {
+                  setEditingSubjectId(null)
+                  setForm(emptySubjectForm)
+                  setError('')
+                  setSubjectFormOpen((open) => !open)
+                }}
+              >
+                {subjectFormOpen && !editingSubjectId ? 'Close form' : '+ Add subject'}
+              </button>
+            </div>
+          </div>
           <div className="table-wrap">
             <table>
               <thead>
@@ -1875,13 +2006,13 @@ function Dashboard({ session, onLogout }) {
             <label>
               <span>Current attended</span>
               <input
-                type="number"
-                min="0"
+                type="text"
+                inputMode="numeric"
                 value={whatIf.attended}
                 onChange={(event) =>
                   setWhatIf((current) => ({
                     ...current,
-                    attended: Number(event.target.value),
+                    attended: event.target.value,
                   }))
                 }
               />
@@ -1890,13 +2021,13 @@ function Dashboard({ session, onLogout }) {
             <label>
               <span>Current total</span>
               <input
-                type="number"
-                min="1"
+                type="text"
+                inputMode="numeric"
                 value={whatIf.total}
                 onChange={(event) =>
                   setWhatIf((current) => ({
                     ...current,
-                    total: Number(event.target.value),
+                    total: event.target.value,
                   }))
                 }
               />
@@ -1905,13 +2036,13 @@ function Dashboard({ session, onLogout }) {
             <label>
               <span>Future classes attended</span>
               <input
-                type="number"
-                min="0"
+                type="text"
+                inputMode="numeric"
                 value={whatIf.futureAttended}
                 onChange={(event) =>
                   setWhatIf((current) => ({
                     ...current,
-                    futureAttended: Number(event.target.value),
+                    futureAttended: event.target.value,
                   }))
                 }
               />
@@ -1920,13 +2051,13 @@ function Dashboard({ session, onLogout }) {
             <label>
               <span>Future classes missed</span>
               <input
-                type="number"
-                min="0"
+                type="text"
+                inputMode="numeric"
                 value={whatIf.futureMissed}
                 onChange={(event) =>
                   setWhatIf((current) => ({
                     ...current,
-                    futureMissed: Number(event.target.value),
+                    futureMissed: event.target.value,
                   }))
                 }
               />
@@ -1935,70 +2066,193 @@ function Dashboard({ session, onLogout }) {
             <label>
               <span>Target attendance</span>
               <input
-                type="number"
-                min="0"
-                max="100"
+                type="text"
+                inputMode="numeric"
                 value={whatIf.target}
                 onChange={(event) =>
                   setWhatIf((current) => ({
                     ...current,
-                    target: Number(event.target.value),
+                    target: event.target.value,
                   }))
                 }
               />
             </label>
           </div>
 
+          {!whatIfFieldsValid && (
+            <div className="feedback error whatif-validation" role="status">
+              Enter whole-number values, keep attended classes at or below total, and set the target
+              between 0% and 100%.
+            </div>
+          )}
+
           <div className="whatif-results">
             <div>
               <span>Future attendance %</span>
-              <strong>
-                {getFutureAttendance(
-                  whatIf.attended,
-                  whatIf.total,
-                  whatIf.futureAttended,
-                  whatIf.futureMissed,
-                ).toFixed(2)}%
+              <strong className={!whatIfFieldsValid ? 'result-placeholder' : ''}>
+                {whatIfFieldsValid
+                  ? `${getFutureAttendance(
+                      whatIfNumbers.attended,
+                      whatIfNumbers.total,
+                      whatIfNumbers.futureAttended,
+                      whatIfNumbers.futureMissed,
+                    ).toFixed(2)}%`
+                  : '—'}
               </strong>
             </div>
 
             <div>
               <span>Classes required</span>
-              <strong>
-                {getClassesRequired(
-                  whatIf.attended + whatIf.futureAttended,
-                  whatIf.total + whatIf.futureAttended + whatIf.futureMissed,
-                  whatIf.target,
-                )}
+              <strong className={!whatIfFieldsValid ? 'result-placeholder' : ''}>
+                {whatIfFieldsValid
+                  ? getClassesRequired(
+                      whatIfNumbers.attended + whatIfNumbers.futureAttended,
+                      whatIfNumbers.total +
+                        whatIfNumbers.futureAttended +
+                        whatIfNumbers.futureMissed,
+                      whatIfNumbers.target,
+                    )
+                  : '—'}
               </strong>
             </div>
 
             <div>
               <span>Classes can be missed</span>
-              <strong>
-                {getClassesMissed(
-                  whatIf.attended + whatIf.futureAttended,
-                  whatIf.total + whatIf.futureAttended + whatIf.futureMissed,
-                  whatIf.target,
-                )}
+              <strong className={!whatIfFieldsValid ? 'result-placeholder' : ''}>
+                {whatIfFieldsValid
+                  ? getClassesMissed(
+                      whatIfNumbers.attended + whatIfNumbers.futureAttended,
+                      whatIfNumbers.total +
+                        whatIfNumbers.futureAttended +
+                        whatIfNumbers.futureMissed,
+                      whatIfNumbers.target,
+                    )
+                  : '—'}
               </strong>
             </div>
 
             <div>
               <span>Target achieved</span>
-              <strong>
-                {getFutureAttendance(
-                  whatIf.attended,
-                  whatIf.total,
-                  whatIf.futureAttended,
-                  whatIf.futureMissed,
-                ) >= Number(whatIf.target)
-                  ? 'Yes'
-                  : 'No'}
+              <strong className={!whatIfFieldsValid ? 'result-placeholder' : ''}>
+                {whatIfFieldsValid
+                  ? getFutureAttendance(
+                      whatIfNumbers.attended,
+                      whatIfNumbers.total,
+                      whatIfNumbers.futureAttended,
+                      whatIfNumbers.futureMissed,
+                    ) >= whatIfNumbers.target
+                    ? 'Yes'
+                    : 'No'
+                  : '—'}
               </strong>
             </div>
           </div>
         </section>
+        {profileEditing && (
+          <div
+            className="profile-modal-backdrop"
+            role="presentation"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget && !profileSaving) closeProfileEditor()
+            }}
+          >
+            <section
+              className="profile-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="profile-modal-title"
+            >
+              <div className="profile-modal-header">
+                <div>
+                  <p className="panel-kicker">Personal details</p>
+                  <h2 id="profile-modal-title">Update your profile</h2>
+                  <p>Keep your student information current for your attendance reports.</p>
+                </div>
+                <button
+                  type="button"
+                  className="profile-modal-close"
+                  aria-label="Close profile editor"
+                  onClick={() => closeProfileEditor()}
+                  disabled={profileSaving}
+                >
+                  ×
+                </button>
+              </div>
+
+              <div className="profile-modal-avatar-row">
+                <div className="avatar-preview">
+                  {profile.avatarUrl ? (
+                    <img src={profile.avatarUrl} alt="Profile" />
+                  ) : (
+                    <span>{profile.studentName.charAt(0).toUpperCase()}</span>
+                  )}
+                </div>
+                <label className="small-button upload-button">
+                  {profileSaving ? 'Uploading...' : 'Change photo'}
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    onChange={handleProfilePhotoChange}
+                    disabled={profileSaving}
+                  />
+                </label>
+              </div>
+
+              <form className="profile-form profile-modal-form" onSubmit={handleProfileSave}>
+                <label>
+                  <span>Student name</span>
+                  <input
+                    type="text"
+                    value={profile.studentName}
+                    onChange={(event) =>
+                      setProfile((current) => ({ ...current, studentName: event.target.value }))
+                    }
+                    autoComplete="name"
+                  />
+                </label>
+                <label>
+                  <span>PRN number</span>
+                  <input
+                    type="text"
+                    value={profile.prnNumber}
+                    onChange={(event) =>
+                      setProfile((current) => ({ ...current, prnNumber: event.target.value }))
+                    }
+                    placeholder="Enter your PRN"
+                  />
+                </label>
+                <label>
+                  <span>University email (optional)</span>
+                  <input
+                    type="email"
+                    value={profile.universityEmail}
+                    onChange={(event) =>
+                      setProfile((current) => ({ ...current, universityEmail: event.target.value }))
+                    }
+                    placeholder="student@university.ac.in"
+                    autoComplete="email"
+                  />
+                </label>
+                {profileError && <div className="feedback error">{profileError}</div>}
+                {profileMessage && <div className="feedback success">{profileMessage}</div>}
+                <div className="form-actions profile-modal-actions">
+                  <button type="submit" className="primary-button" disabled={profileSaving}>
+                    {profileSaving ? 'Saving...' : 'Save profile'}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button button-ghost"
+                    onClick={() => closeProfileEditor()}
+                    disabled={profileSaving}
+                  >
+                    Close
+                  </button>
+                </div>
+              </form>
+            </section>
+          </div>
+        )}
+
         {subjectPendingDelete && (
           <div className="confirm-backdrop" role="presentation">
             <section

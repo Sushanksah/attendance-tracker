@@ -5,13 +5,19 @@ A responsive React and Vite application for tracking student attendance.
 ## Features
 
 - Supabase signup, login, password reset, and logout
-- Add, edit, and delete subjects
+- Profile editing in an in-page dialog
+- Add, edit, and delete subjects in an in-page dialog
+- Export formatted Excel attendance reports with color-coded status
 - Overall attendance calculation
 - Subject attendance status
 - Classes required to reach a target
 - Classes that can be missed while maintaining a target
-- Attendance planner and what-if calculator
+- Attendance planner, Google Calendar schedule, and what-if calculator
 - Supabase Row Level Security for user-specific data
+
+The subject report workbook includes the student name, PRN, export date, weighted overall attendance, and each subject's attended/total classes, current percentage, and status. Status colors are green for safe, amber for warning, and red for below target. The target value is deliberately not included in the export. Open the downloaded `.xlsx` file with Excel or another spreadsheet app.
+
+Subject counts and the What-if calculator use keyboard-entered numeric fields rather than scrollable number spinners. What-if fields can be cleared while editing; calculations appear once the values are valid.
 
 ## Local setup
 
@@ -63,6 +69,16 @@ Subjects are stored in Supabase, not in Vercel. In Vercel, open **Project → Se
 Add the variables to the **Production** environment (and Preview too if you use preview deployments), then redeploy. The database schema and RLS policies in `supabase-schema.sql` must also have been applied to that same Supabase project. Sign into the same Attendance Tracker account on both sites; Google Calendar authorization is separate from the app's Supabase account.
 
 If a previous build saved subjects only in this browser, and the database has no subjects for the signed-in account, the dashboard offers an explicit button to import those browser-saved subjects into Supabase. Browser storage is specific to a site origin, so subjects saved at `localhost` are not automatically available at a Vercel URL. Open the old site in the same browser to retrieve its local data; otherwise those local-only subjects must be entered again.
+
+## Publishing updates through GitHub
+
+If this GitHub repository is connected to the Vercel project, pushing a commit to the production branch (usually `main`) automatically starts a new Vercel deployment. A push does not delete Supabase data; data remains in the configured Supabase project. Before publishing:
+
+1. Run `npm run lint` and `npm run build` locally.
+2. Confirm the Vercel environment variables are configured for the correct Supabase project and Google OAuth client.
+3. Push the changes to GitHub. Check the Vercel deployment status after the push.
+
+If the Vercel build fails, Vercel normally keeps serving the last successful deployment. Code changes are not a database migration: for any future schema changes, review and apply the SQL migration to Supabase separately. Never commit `.env` or service-role keys; `.env` is excluded by `.gitignore`.
 
 ## Validation
 
