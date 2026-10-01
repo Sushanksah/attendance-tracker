@@ -13,6 +13,8 @@ A responsive React and Vite application for tracking student attendance.
 - Classes required to reach a target
 - Classes that can be missed while maintaining a target
 - Attendance planner, Google Calendar schedule, and what-if calculator
+- Calendar present/absent marks synchronized between signed-in devices
+- Private profile photos refreshed from Supabase Storage on each sign-in
 - Supabase Row Level Security for user-specific data
 
 The subject report workbook includes the student name, PRN, export date, weighted overall attendance, and each subject's attended/total classes, current percentage, and status. Status colors are green for safe, amber for warning, and red for below target. The target value is deliberately not included in the export. Open the downloaded `.xlsx` file with Excel or another spreadsheet app.
@@ -35,6 +37,25 @@ VITE_SUPABASE_ANON_KEY=your-anon-key
 ```
 
 Run [supabase-schema.sql](./supabase-schema.sql) in the Supabase SQL Editor before testing database features.
+
+### Updating an existing Supabase project
+
+Calendar attendance marks are stored separately from subject totals so a second browser can show the same class as Present or Absent without counting it twice. To enable this on an existing deployment:
+
+1. Open the Supabase project used by the app and select **SQL Editor → New query**.
+2. Paste the complete, current contents of `supabase-schema.sql` and run it. The script safely creates the calendar attendance table, its per-user RLS policies, and the atomic attendance function.
+3. Deploy the updated app, then reconnect Google Calendar on the browser that already has the old local attendance marks. The app imports statuses for calendar events still returned by Google; this import does not change subject totals.
+4. Sign in and connect Google Calendar on your other devices. The app then loads saved marks from Supabase.
+
+Older local marks that Google no longer returns cannot be matched to a calendar event automatically. Their subject totals remain as they are; do not mark those same classes again or the totals would count them twice.
+
+While the dashboard stays open, it checks Supabase for attendance marks and subject totals from other devices every 15 seconds and when the page becomes active again. Each browser/device must still sign into the same Attendance Tracker account and connect Google Calendar separately.
+
+Profile photos remain in the private `profile-photos` storage bucket. The profile row now saves the stable storage path instead of a temporary signed URL, and a fresh signed URL is created for each browser. Existing signed URLs are converted to storage paths automatically when the profile is loaded.
+
+### Mobile layout
+
+At phone widths, attendance metrics use a compact two-column layout, and each subject is shown as a labeled card instead of forcing a wide table to scroll sideways. Actions and status labels remain available at every screen size.
 
 ## Google Calendar setup
 

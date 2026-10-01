@@ -39,6 +39,16 @@ create table if not exists public.attendance_logs (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.calendar_attendance (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  subject_id uuid not null references public.subjects (id) on delete cascade,
+  event_key text not null,
+  status text not null check (status in ('present', 'absent')),
+  created_at timestamptz not null default now(),
+  unique (user_id, event_key)
+);
+
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
@@ -83,6 +93,7 @@ for each row execute procedure public.update_updated_at();
 alter table public.profiles enable row level security;
 alter table public.subjects enable row level security;
 alter table public.attendance_logs enable row level security;
+alter table public.calendar_attendance enable row level security;
 
 drop policy if exists "Users can view their own profile" on public.profiles;
 create policy "Users can view their own profile"
@@ -152,6 +163,117 @@ create policy "Users can delete their own attendance logs"
 on public.attendance_logs
 for delete
 using (auth.uid() = user_id);
+
+drop policy if exists "Users can view their own calendar attendance" on public.calendar_attendance;
+create policy "Users can view their own calendar attendance"
+on public.calendar_attendance
+for select
+using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert their own calendar attendance" on public.calendar_attendance;
+create policy "Users can insert their own calendar attendance"
+on public.calendar_attendance
+for insert
+with check (
+  auth.uid() = user_id
+  and exists (
+    select 1
+    from public.subjects s
+    where s.id = calendar_attendance.subject_id
+      and s.user_id = auth.uid()
+  )
+);
+
+create or replace function public.mark_calendar_attendance(
+  p_subject_id uuid,
+  p_event_key text,
+  p_status text
+)
+returns table (
+  subject_id uuid,
+  subject_name text,
+  total_classes integer,
+  attended_classes integer,
+  target_percentage numeric,
+  attendance_status text,
+  inserted boolean
+)
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  v_user_id uuid := auth.uid();
+  v_inserted boolean := false;
+  v_status text;
+  v_subject public.subjects%rowtype;
+begin
+  if v_user_id is null then
+    raise exception 'You must be signed in to mark attendance.';
+  end if;
+
+  if p_status not in ('present', 'absent') then
+    raise exception 'Attendance status must be present or absent.';
+  end if;
+
+  if p_event_key is null or length(trim(p_event_key)) = 0 then
+    raise exception 'A calendar event key is required.';
+  end if;
+
+  insert into public.calendar_attendance (user_id, subject_id, event_key, status)
+  values (v_user_id, p_subject_id, p_event_key, p_status)
+  on conflict (user_id, event_key) do nothing
+  returning true into v_inserted;
+
+  if coalesce(v_inserted, false) then
+    update public.subjects
+    set total_classes = total_classes + 1,
+        attended_classes = attended_classes + case when p_status = 'present' then 1 else 0 end
+    where id = p_subject_id
+      and user_id = v_user_id
+    returning * into v_subject;
+
+    if not found then
+      raise exception 'Subject not found or not owned by the signed-in user.';
+    end if;
+
+    v_status := p_status;
+  else
+    select ca.status
+    into v_status
+    from public.calendar_attendance ca
+    where ca.user_id = v_user_id
+      and ca.event_key = p_event_key
+      and ca.subject_id = p_subject_id;
+
+    if not found then
+      raise exception 'This calendar class was already recorded for a different subject.';
+    end if;
+
+    select s.*
+    into v_subject
+    from public.subjects s
+    where s.id = p_subject_id
+      and s.user_id = v_user_id;
+
+    if not found then
+      raise exception 'Subject not found or not owned by the signed-in user.';
+    end if;
+  end if;
+
+  return query
+  select
+    v_subject.id,
+    v_subject.subject_name,
+    v_subject.total_classes,
+    v_subject.attended_classes,
+    v_subject.target_percentage,
+    v_status,
+    coalesce(v_inserted, false);
+end;
+$$;
+
+grant execute on function public.mark_calendar_attendance(uuid, text, text) to authenticated;
 
 insert into storage.buckets (id, name, public)
 values ('profile-photos', 'profile-photos', false)

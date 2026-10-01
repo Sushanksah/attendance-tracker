@@ -853,6 +853,12 @@ p {
   gap: 16px;
 }
 
+.auth-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 18px;
+}
+
 .subject-form label,
 .field {
   display: grid;
@@ -1724,35 +1730,106 @@ tbody td:first-child {
 
 @media (max-width: 480px) {
   .app-shell {
-    padding: 14px;
+    padding: 10px;
   }
 
   .dashboard-shell {
-    padding: 12px;
+    padding: 10px;
   }
 
   .topbar {
-    flex-direction: column;
-    align-items: flex-start;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 18px;
+  }
+
+  .topbar > div:first-child {
+    min-width: 0;
+  }
+
+  .topbar .eyebrow {
+    margin-bottom: 4px;
+    font-size: 0.62rem;
+  }
+
+  .topbar h1 {
+    font-size: clamp(1.35rem, 6vw, 1.8rem);
   }
 
   .profile-box {
     text-align: left;
-    width: 100%;
+    width: auto;
+    padding: 7px 9px;
   }
 
   .profile-box-heading {
     justify-content: flex-start;
   }
 
+  .profile-box small {
+    display: none;
+  }
+
+  .header-avatar {
+    width: 34px;
+    height: 34px;
+  }
+
   .summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+
+  .metric-card {
+    min-width: 0;
+    padding: 12px;
+    border-radius: 14px;
+  }
+
+  .metric-card span {
+    margin-bottom: 5px;
+    font-size: 0.72rem;
+  }
+
+  .metric-card strong {
+    font-size: clamp(1.15rem, 6vw, 1.65rem);
+    overflow-wrap: anywhere;
+  }
+
+  .panel {
+    padding: 15px;
+    border-radius: 16px;
+  }
+
+  .panel h2 {
+    margin-bottom: 14px;
+    font-size: 1.15rem;
+  }
+
+  .two-column {
     grid-template-columns: 1fr;
   }
 
-  .two-column,
-  .mode-switch,
+  .mode-switch {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 5px;
+    margin: 16px 0;
+  }
+
+  .mode-button {
+    padding: 9px 4px;
+    font-size: 0.78rem;
+  }
+
   .whatif-results {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .whatif-results > div {
+    min-width: 0;
+    padding: 11px;
   }
 
   .subject-table-actions {
@@ -1808,14 +1885,120 @@ tbody td:first-child {
   }
 
   .row-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .row-actions .small-button {
+    min-width: 0;
+    padding: 8px 5px;
+    font-size: 0.78rem;
+  }
+
+  .table-wrap {
+    overflow: visible;
+    border: 0;
+    background: transparent;
+  }
+
+  table {
+    display: block;
+    min-width: 0;
+  }
+
+  thead {
+    display: none;
+  }
+
+  tbody {
+    display: grid;
+    gap: 10px;
+  }
+
+  tbody tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow: hidden;
+    border: 1px solid #e1e9f4;
+    border-radius: 14px;
+    background: #ffffff;
+    box-shadow: 0 5px 14px rgb(30 64 175 / 5%);
+  }
+
+  tbody tr:nth-child(even),
+  tbody tr:hover {
+    background: #ffffff;
+  }
+
+  tbody td,
+  tbody td:first-child {
+    display: flex;
+    min-width: 0;
     flex-direction: column;
-    align-items: stretch;
+    justify-content: center;
+    gap: 4px;
+    padding: 10px 12px;
+    border-bottom: 1px solid #edf2f7;
+    color: #0f172a;
+    font-size: 0.88rem;
+    overflow-wrap: anywhere;
+  }
+
+  tbody td::before {
+    color: #64748b;
+    content: attr(data-label);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  tbody td:first-child,
+  tbody td:last-child {
+    grid-column: 1 / -1;
+  }
+
+  tbody td:last-child {
+    border-bottom: 0;
   }
 
   .calendar-event {
     align-items: flex-start;
-    flex-direction: column;
-    gap: 8px;
+    gap: 10px;
+    padding: 11px;
+  }
+
+  .calendar-event-time {
+    min-width: 96px;
+    font-size: 0.75rem;
+  }
+
+  .calendar-event-time span,
+  .calendar-event-details span {
+    font-size: 0.75rem;
+  }
+
+  .calendar-event-details {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .calendar-events {
+    max-height: 300px;
+  }
+
+  .calendar-header {
+    gap: 10px;
+  }
+
+  .calendar-connect-button {
+    min-width: 0;
+  }
+
+  .content-grid {
+    gap: 12px;
+    margin-bottom: 12px;
   }
 
   .name-input {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import writeExcelFile from 'write-excel-file/browser'
 import './App.css'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
@@ -79,6 +79,38 @@ function getCalendarEventKey(event) {
   return `${event.calendarId || event.calendarName || 'calendar'}-${event.id}`
 }
 
+function getProfilePhotoPath(value, userId) {
+  if (!value) return ''
+  if (value.startsWith(`${userId}/`)) return value
+
+  try {
+    const pathname = new URL(value).pathname
+    const markers = ['/object/sign/profile-photos/', '/object/public/profile-photos/']
+    const marker = markers.find((candidate) => pathname.includes(candidate))
+    if (!marker) return ''
+
+    const path = decodeURIComponent(pathname.split(marker).pop() || '')
+    return path.startsWith(`${userId}/`) ? path : ''
+  } catch {
+    return ''
+  }
+}
+
+async function getProfilePhotoUrl(path) {
+  if (!supabase || !path) return ''
+
+  const { data, error } = await supabase.storage
+    .from('profile-photos')
+    .createSignedUrl(path, 60 * 60 * 24 * 7)
+
+  if (error) {
+    console.error('Could not create a fresh profile photo URL:', error)
+    return ''
+  }
+
+  return data.signedUrl
+}
+
 function getCalendarAttendanceStatus(status) {
   if (status === 'attended') return 'present'
   if (status === 'missed') return 'absent'
@@ -119,6 +151,17 @@ async function getGoogleApiError(response, fallbackMessage) {
   return `${fallbackMessage} (HTTP ${response.status})`
 }
 
+function formatSupabaseError(error) {
+  return [
+    error?.code ? `Code ${error.code}` : '',
+    error?.message || '',
+    error?.details ? `Details: ${error.details}` : '',
+    error?.hint ? `Hint: ${error.hint}` : '',
+  ]
+    .filter(Boolean)
+    .join(' — ')
+}
+
 function calculatePercentage(attended, total) {
   if (!total || total <= 0) return 0
   return (attended / total) * 100
@@ -135,13 +178,21 @@ function getClassesRequired(attended, total, targetPercent) {
   const totalCount = Number(total)
   const target = Number(targetPercent)
 
-  if (!Number.isFinite(target) || target <= 0 || target >= 100) {
+  if (!Number.isFinite(target) || target < 0 || target > 100) {
     return 0
   }
 
   const currentPercentage = calculatePercentage(attendedCount, totalCount)
 
   if (currentPercentage >= target) {
+    return 0
+  }
+
+  if (target === 100) {
+    return null
+  }
+
+  if (target === 0) {
     return 0
   }
 
@@ -213,6 +264,16 @@ function getOverallPlanDetails(attended, total, targetPercent = 75) {
   }
 
   const count = getClassesRequired(attended, total, target)
+  if (count === null) {
+    return {
+      type: 'warning',
+      count: null,
+      progress: 0,
+      label: 'Classes to attend',
+      text: 'A 100% attendance target cannot be reached by attending a finite number of additional classes.',
+    }
+  }
+
   return {
     type: 'warning',
     count,
@@ -398,7 +459,7 @@ async function saveExtendedProfileToSupabase(session, profile) {
       full_name: profile.studentName.trim(),
       prn_number: profile.prnNumber.trim() || null,
       university_email: profile.universityEmail.trim().toLowerCase() || null,
-      avatar_url: profile.avatarUrl || null,
+      avatar_url: profile.avatarPath || null,
     })
 
   if (error) {
@@ -433,16 +494,10 @@ async function uploadProfilePhoto(session, file) {
     throw new Error('Could not upload the profile photo. Check the Supabase storage setup.')
   }
 
-  const { data, error: signedUrlError } = await supabase.storage
-    .from('profile-photos')
-    .createSignedUrl(path, 60 * 60 * 24 * 7)
+  const url = await getProfilePhotoUrl(path)
+  if (!url) throw new Error('Photo uploaded, but it could not be displayed.')
 
-  if (signedUrlError) {
-    console.error('Failed to create profile photo URL:', signedUrlError)
-    throw new Error('Photo uploaded, but it could not be displayed.')
-  }
-
-  return data.signedUrl
+  return { path, url }
 }
 
 async function loadProfileFromSupabase(session, setProfile) {
@@ -461,14 +516,27 @@ async function loadProfileFromSupabase(session, setProfile) {
     return
   }
 
-  if (data?.full_name) {
+  if (data) {
+    const avatarPath = getProfilePhotoPath(data.avatar_url, session.user.id)
+    const avatarUrl = await getProfilePhotoUrl(avatarPath)
     setProfile((current) => ({
       ...current,
-      studentName: data.full_name,
+      studentName: data.full_name || current.studentName,
       prnNumber: data.prn_number || '',
       universityEmail: data.university_email || '',
-      avatarUrl: data.avatar_url || '',
+      avatarPath,
+      avatarUrl,
     }))
+
+    if (avatarPath && data.avatar_url !== avatarPath) {
+      const { error: migrationError } = await supabase
+        .from('profiles')
+        .update({ avatar_url: avatarPath })
+        .eq('id', session.user.id)
+      if (migrationError) {
+        console.error('Could not migrate the saved profile photo path:', migrationError)
+      }
+    }
   }
 }
 
@@ -499,6 +567,86 @@ async function loadSubjectsFromSupabase(session) {
   return mapped
 }
 
+async function loadCalendarAttendanceStatuses(session) {
+  if (!supabase || !session?.user?.id) {
+    throw new Error('Sign in to sync calendar attendance across devices.')
+  }
+
+  const { data, error } = await supabase
+    .from('calendar_attendance')
+    .select('event_key, status')
+    .eq('user_id', session.user.id)
+
+  if (error) {
+    console.error('Could not load calendar attendance statuses:', error)
+    throw new Error(
+      `Calendar attendance could not be loaded from Supabase. Run the latest supabase-schema.sql in the Supabase SQL Editor. ${formatSupabaseError(error)}`,
+    )
+  }
+
+  return Object.fromEntries(
+    (data || []).map((record) => [record.event_key, record.status]),
+  )
+}
+
+async function syncCalendarAttendanceFromSupabase(session, events, subjects) {
+  if (!supabase || !session?.user?.id) {
+    throw new Error('Sign in to sync calendar attendance across devices.')
+  }
+
+  const localKey = `attendance-calendar-status-${session.user.id}`
+  let localStatuses = {}
+  try {
+    localStatuses = JSON.parse(window.localStorage.getItem(localKey) || '{}')
+  } catch {
+    console.error('Could not read saved calendar attendance from this browser.')
+  }
+
+  const legacyRows = events.flatMap((event) => {
+    const eventKey = getCalendarEventKey(event)
+    const status = getCalendarAttendanceStatus(localStatuses[eventKey])
+    if (!['present', 'absent'].includes(status)) return []
+
+    const title = `${event.summary || ''} ${event.description || ''}`.toLowerCase()
+    const matchingSubject = subjects
+      .filter((subject) => title.includes(subject.name.toLowerCase()))
+      .sort((first, second) => second.name.length - first.name.length)[0]
+    if (!matchingSubject) return []
+
+    return [{
+      user_id: session.user.id,
+      subject_id: matchingSubject.id,
+      event_key: eventKey,
+      status,
+    }]
+  })
+
+  const savedStatuses = await loadCalendarAttendanceStatuses(session)
+  const rowsToImport = legacyRows.filter((row) => !savedStatuses[row.event_key])
+  let importWarning = ''
+
+  if (rowsToImport.length > 0) {
+    const { error: migrationError } = await supabase
+      .from('calendar_attendance')
+      .upsert(rowsToImport, {
+        onConflict: 'user_id,event_key',
+        ignoreDuplicates: true,
+      })
+    if (migrationError) {
+      console.error('Could not migrate saved browser attendance statuses:', migrationError)
+      importWarning =
+        `Some attendance marks saved only in this browser could not be synchronized. Check the calendar_attendance table and its RLS policies in Supabase. ${formatSupabaseError(migrationError)}`
+    }
+  }
+
+  const importedStatuses = importWarning
+    ? {}
+    : Object.fromEntries(rowsToImport.map((row) => [row.event_key, row.status]))
+  const mergedStatuses = { ...localStatuses, ...savedStatuses, ...importedStatuses }
+  window.localStorage.setItem(localKey, JSON.stringify(mergedStatuses))
+  return { statuses: mergedStatuses, warning: importWarning }
+}
+
 function Dashboard({ session, onLogout }) {
   const [profile, setProfile] = useState(() => {
     const savedProfile =
@@ -509,6 +657,7 @@ function Dashboard({ session, onLogout }) {
       studentName: savedName,
       prnNumber: '',
       universityEmail: '',
+      avatarPath: '',
       avatarUrl: '',
     }
   })
@@ -524,6 +673,7 @@ function Dashboard({ session, onLogout }) {
   const [calendarLoading, setCalendarLoading] = useState(false)
   const [calendarError, setCalendarError] = useState('')
   const [calendarConnected, setCalendarConnected] = useState(false)
+  const [calendarStatusSyncReady, setCalendarStatusSyncReady] = useState(false)
   const [calendarAttendance, setCalendarAttendance] = useState(() => {
     if (typeof window === 'undefined' || !session?.user?.id) return {}
 
@@ -618,9 +768,13 @@ function Dashboard({ session, onLogout }) {
     setProfileSaving(true)
 
     try {
-      const avatarUrl = await uploadProfilePhoto(session, file)
-      if (!avatarUrl) throw new Error('Profile photo upload is unavailable.')
-      setProfile((current) => ({ ...current, avatarUrl }))
+      const photo = await uploadProfilePhoto(session, file)
+      if (!photo) throw new Error('Profile photo upload is unavailable.')
+      setProfile((current) => ({
+        ...current,
+        avatarPath: photo.path,
+        avatarUrl: photo.url,
+      }))
       setProfileMessage('Photo uploaded. Save your profile to keep this change.')
     } catch (uploadError) {
       setProfileError(uploadError.message || 'Could not update profile photo.')
@@ -708,7 +862,7 @@ function Dashboard({ session, onLogout }) {
     return () => window.removeEventListener('keydown', handleEscape)
   }, [profileEditing, profileSaving, profileBeforeEdit])
 
-  const loadCalendarEvents = async (accessToken) => {
+  const loadCalendarEvents = useCallback(async (accessToken) => {
     const { timeMin, timeMax } = getCalendarDateRange()
     const requestOptions = {
       headers: { Authorization: `Bearer ${accessToken}` },
@@ -788,10 +942,90 @@ function Dashboard({ session, onLogout }) {
       throw new Error(failedCalendars[0].error)
     }
 
-    setCalendarEvents(events)
-  }
+    let localStatuses = {}
+    try {
+      localStatuses = JSON.parse(
+        window.localStorage.getItem(`attendance-calendar-status-${session.user.id}`) || '{}',
+      )
+    } catch {
+      console.error('Could not read saved calendar attendance from this browser.')
+    }
 
-  const requestCalendarAccess = async (prompt) => {
+    let savedStatuses = localStatuses
+    try {
+      const availableSubjects = await loadSubjectsFromSupabase(session)
+      const syncResult = await syncCalendarAttendanceFromSupabase(
+        session,
+        events,
+        availableSubjects,
+      )
+      savedStatuses = syncResult.statuses
+      setCalendarStatusSyncReady(true)
+      setCalendarError(syncResult.warning)
+    } catch (syncError) {
+      console.error('Calendar events loaded, but attendance could not be synchronized:', syncError)
+      setCalendarStatusSyncReady(false)
+      setCalendarError(syncError.message || 'Calendar attendance could not be synchronized.')
+    }
+
+    setCalendarEvents(events)
+    setCalendarAttendance(savedStatuses)
+    setCalendarConnected(true)
+  }, [session])
+
+  useEffect(() => {
+    if (!calendarConnected || !calendarEvents.length || !calendarStatusSyncReady) {
+      return undefined
+    }
+
+    let active = true
+    const refreshStatuses = async () => {
+      if (document.visibilityState === 'hidden') return
+
+      try {
+        const [savedStatuses, savedSubjects] = await Promise.all([
+          loadCalendarAttendanceStatuses(session),
+          loadSubjectsFromSupabase(session),
+        ])
+        if (!active) return
+
+        if (!localSubjectsNeedImport) {
+          setSubjects(savedSubjects)
+        }
+        setCalendarAttendance((current) => {
+          const next = { ...current, ...savedStatuses }
+          window.localStorage.setItem(
+            `attendance-calendar-status-${session.user.id}`,
+            JSON.stringify(next),
+          )
+          return next
+        })
+      } catch (refreshError) {
+        if (!active) return
+        setCalendarStatusSyncReady(false)
+        setCalendarError(refreshError.message || 'Calendar attendance could not be refreshed.')
+      }
+    }
+
+    const intervalId = window.setInterval(refreshStatuses, 15_000)
+    window.addEventListener('focus', refreshStatuses)
+    document.addEventListener('visibilitychange', refreshStatuses)
+
+    return () => {
+      active = false
+      window.clearInterval(intervalId)
+      window.removeEventListener('focus', refreshStatuses)
+      document.removeEventListener('visibilitychange', refreshStatuses)
+    }
+  }, [
+    calendarConnected,
+    calendarEvents.length,
+    calendarStatusSyncReady,
+    localSubjectsNeedImport,
+    session,
+  ])
+
+  const requestCalendarAccess = useCallback(async (prompt) => {
     await loadGoogleIdentityScript()
 
     return new Promise((resolve, reject) => {
@@ -834,13 +1068,13 @@ function Dashboard({ session, onLogout }) {
       })
       tokenClient.requestAccessToken({ prompt })
     })
-  }
+  }, [session])
 
-  const connectCalendarWithPrompt = async (prompt) => {
+  const connectCalendarWithPrompt = useCallback(async (prompt) => {
     const accessToken = await requestCalendarAccess(prompt)
     await loadCalendarEvents(accessToken)
     setCalendarConnected(true)
-  }
+  }, [loadCalendarEvents, requestCalendarAccess])
 
   const handleCalendarConnect = async () => {
     setCalendarError('')
@@ -874,14 +1108,12 @@ function Dashboard({ session, onLogout }) {
 
     try {
       const { accessToken, expiresAt } = JSON.parse(savedToken)
-      setCalendarLoading(true)
       const loadPromise =
         accessToken && Number(expiresAt) > Date.now()
           ? loadCalendarEvents(accessToken)
           : connectCalendarWithPrompt('none')
 
       loadPromise
-        .then(() => setCalendarConnected(true))
         .catch((calendarLoadError) => {
           window.localStorage.removeItem(`attendance-calendar-token-${session.user.id}`)
           setCalendarConnected(false)
@@ -894,7 +1126,7 @@ function Dashboard({ session, onLogout }) {
     } catch {
       window.localStorage.removeItem(`attendance-calendar-token-${session.user.id}`)
     }
-  }, [session])
+  }, [session, loadCalendarEvents, connectCalendarWithPrompt])
 
   const handleSubjectInput = (event) => {
     const { name, value } = event.target
@@ -1059,39 +1291,56 @@ function Dashboard({ session, onLogout }) {
       return false
     }
 
-    const updatedSubject = {
-      ...subject,
-      total: Number(subject.total) + 1,
-      attended: Number(subject.attended) + (attended ? 1 : 0),
-    }
-
     try {
-      const savedSubject = await saveSubjectToSupabase(session, updatedSubject, true)
+      const { data, error: markError } = await supabase.rpc('mark_calendar_attendance', {
+        p_subject_id: subjectId,
+        p_event_key: getCalendarEventKey(subjectEvent),
+        p_status: attended ? 'present' : 'absent',
+      })
+      if (markError) throw markError
+
+      const result = Array.isArray(data) ? data[0] : data
+      if (!result) throw new Error('The database did not return the saved attendance.')
+
+      const savedSubject = {
+        id: result.subject_id,
+        name: result.subject_name,
+        total: Number(result.total_classes),
+        attended: Number(result.attended_classes),
+        target: Number(result.target_percentage),
+      }
       setSubjects((current) =>
         current.map((item) => (item.id === subjectId ? savedSubject : item)),
       )
-      await saveAttendanceLogToSupabase(
-        session,
-        savedSubject,
-        'update',
-        attended ? 'Marked present' : 'Marked absent',
-      )
+      if (result.inserted) {
+        await saveAttendanceLogToSupabase(
+          session,
+          savedSubject,
+          'update',
+          attended ? 'Marked present' : 'Marked absent',
+        )
+      }
+
+      const eventKey = getCalendarEventKey(subjectEvent)
+      const savedStatus = result.attendance_status
+      setCalendarStatusSyncReady(true)
+      setCalendarAttendance((current) => {
+        const next = { ...current, [eventKey]: savedStatus }
+        window.localStorage.setItem(
+          `attendance-calendar-status-${session.user.id}`,
+          JSON.stringify(next),
+        )
+        return next
+      })
     } catch (saveError) {
-      setError(`Attendance was not changed because it could not be saved: ${saveError.message || 'unknown error'}`)
+      const setupHint = `${saveError.message || ''}`.includes('mark_calendar_attendance')
+        ? ' Run the latest supabase-schema.sql in your Supabase SQL Editor.'
+        : ''
+      setError(
+        `Attendance was not changed because it could not be saved: ${saveError.message || 'unknown error'}.${setupHint}`,
+      )
       return false
     }
-
-    setCalendarAttendance((current) => {
-      const next = {
-        ...current,
-        [getCalendarEventKey(subjectEvent)]: attended ? 'present' : 'absent',
-      }
-      window.localStorage.setItem(
-        `attendance-calendar-status-${session.user.id}`,
-        JSON.stringify(next),
-      )
-      return next
-    })
 
     return true
   }
@@ -1608,15 +1857,16 @@ function Dashboard({ session, onLogout }) {
           {calendarError && (
             <div className="feedback error" role="alert">
               {calendarError}
-              <p className="oauth-origin-help">
-                If Google showed <code>origin_mismatch</code>, add this exact origin under
-                Google Cloud → OAuth client → Authorized JavaScript origins:{' '}
-                <code>{window.location.origin}</code>
-                <br />
-                This app is using OAuth client ID starting with{' '}
-                <code>{googleClientId ? googleClientId.slice(0, 18) : 'not configured'}</code>.
-                Make sure it matches the client ID on the Google Cloud page you edited.
-              </p>
+              {calendarError.toLowerCase().includes('origin_mismatch') && (
+                <p className="oauth-origin-help">
+                  Add this exact origin under Google Cloud → OAuth client → Authorized
+                  JavaScript origins: <code>{window.location.origin}</code>
+                  <br />
+                  This app is using OAuth client ID starting with{' '}
+                  <code>{googleClientId ? googleClientId.slice(0, 18) : 'not configured'}</code>.
+                  Make sure it matches the client ID on the Google Cloud page you edited.
+                </p>
+              )}
             </div>
           )}
 
@@ -1944,19 +2194,19 @@ function Dashboard({ session, onLogout }) {
 
                   return (
                     <tr key={subject.id}>
-                      <td>{subject.name}</td>
-                      <td>{subject.attended}</td>
-                      <td>{subject.total}</td>
-                      <td>{percentage.toFixed(2)}%</td>
-                      <td>{subject.target}%</td>
-                      <td>
+                      <td data-label="Subject">{subject.name}</td>
+                      <td data-label="Attended">{subject.attended}</td>
+                      <td data-label="Total">{subject.total}</td>
+                      <td data-label="Attendance">{percentage.toFixed(2)}%</td>
+                      <td data-label="Target">{subject.target}%</td>
+                      <td data-label="Status">
                         <span
                           className={`status-badge ${status.toLowerCase().replace(/\s+/g, '-')}`}
                         >
                           {status}
                         </span>
                       </td>
-                      <td>
+                      <td data-label="Actions">
                         <div className="row-actions">
                           {(() => {
                             const actionState = getSubjectAttendanceActionState(subject)
@@ -2105,13 +2355,16 @@ function Dashboard({ session, onLogout }) {
               <span>Classes required</span>
               <strong className={!whatIfFieldsValid ? 'result-placeholder' : ''}>
                 {whatIfFieldsValid
-                  ? getClassesRequired(
-                      whatIfNumbers.attended + whatIfNumbers.futureAttended,
-                      whatIfNumbers.total +
-                        whatIfNumbers.futureAttended +
-                        whatIfNumbers.futureMissed,
-                      whatIfNumbers.target,
-                    )
+                  ? (() => {
+                      const required = getClassesRequired(
+                        whatIfNumbers.attended + whatIfNumbers.futureAttended,
+                        whatIfNumbers.total +
+                          whatIfNumbers.futureAttended +
+                          whatIfNumbers.futureMissed,
+                        whatIfNumbers.target,
+                      )
+                      return required === null ? 'Not attainable' : required
+                    })()
                   : '—'}
               </strong>
             </div>
@@ -2303,10 +2556,89 @@ function Dashboard({ session, onLogout }) {
   )
 }
 
+function PasswordRecovery({ onComplete }) {
+  const [password, setPassword] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const handleSubmit = async (event) => {
+    event.preventDefault()
+    setError('')
+
+    if (password.length < 8) {
+      setError('Choose a password with at least 8 characters.')
+      return
+    }
+    if (password !== confirmation) {
+      setError('The passwords do not match.')
+      return
+    }
+
+    setSaving(true)
+    const { error: updateError } = await supabase.auth.updateUser({ password })
+    setSaving(false)
+
+    if (updateError) {
+      setError(`Could not update your password: ${updateError.message}`)
+      return
+    }
+
+    onComplete()
+  }
+
+  return (
+    <main className="app-shell auth-shell">
+      <section className="auth-card">
+        <p className="eyebrow">Account security</p>
+        <h1>Choose a new password</h1>
+        <p>Enter a new password for your Attendance Tracker account.</p>
+        <form className="auth-form" onSubmit={handleSubmit}>
+          <label className="field">
+            <span>New password</span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              required
+            />
+          </label>
+          <label>
+            <span>New password</span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              required
+            />
+          </label>
+          <label className="field">
+            <span>Confirm new password</span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={confirmation}
+              onChange={(event) => setConfirmation(event.target.value)}
+              required
+            />
+          </label>
+          {error && <div className="feedback error" role="alert">{error}</div>}
+          <button className="primary-button" type="submit" disabled={saving}>
+            {saving ? 'Saving password…' : 'Save new password'}
+          </button>
+        </form>
+      </section>
+    </main>
+  )
+}
+
 function AuthScreen() {
   const [mode, setMode] = useState('login')
   const [form, setForm] = useState(emptyAuthForm)
   const [session, setSession] = useState(null)
+  const [passwordRecovery, setPasswordRecovery] = useState(false)
   const [authLoading, setAuthLoading] = useState(Boolean(supabase))
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -2321,6 +2653,9 @@ function AuthScreen() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, newSession) => {
       if (active) {
+        if (event === 'PASSWORD_RECOVERY') {
+          setPasswordRecovery(true)
+        }
         setSession(newSession)
         setAuthLoading(false)
       }
@@ -2367,6 +2702,9 @@ function AuthScreen() {
   }
 
   if (session) {
+    if (passwordRecovery) {
+      return <PasswordRecovery onComplete={() => setPasswordRecovery(false)} />
+    }
     return <Dashboard session={session} onLogout={handleLogout} />
   }
 
@@ -2439,7 +2777,7 @@ function AuthScreen() {
         setForm(emptyAuthForm)
       } else if (mode === 'reset') {
         const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
-          redirectTo: `${window.location.origin}/reset-password`,
+          redirectTo: window.location.origin,
         })
 
         if (resetError) throw resetError
