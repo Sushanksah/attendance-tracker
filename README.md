@@ -43,7 +43,7 @@ Run [supabase-schema.sql](./supabase-schema.sql) in the Supabase SQL Editor befo
 Calendar attendance marks are stored separately from subject totals so a second browser can show the same class as Present or Absent without counting it twice. To enable this on an existing deployment:
 
 1. Open the Supabase project used by the app and select **SQL Editor → New query**.
-2. Paste the complete, current contents of `supabase-schema.sql` and run it. The script safely creates the calendar attendance table, its per-user RLS policies, and the atomic attendance function.
+2. Paste the complete, current contents of `supabase-schema.sql` and run it. The script safely creates the calendar attendance table, its per-user RLS policies, and the atomic attendance function. Re-running it also replaces that function with the latest fix for PostgreSQL's ambiguous `total_classes` reference.
 3. Deploy the updated app, then reconnect Google Calendar on the browser that already has the old local attendance marks. The app imports statuses for calendar events still returned by Google; this import does not change subject totals.
 4. Sign in and connect Google Calendar on your other devices. The app then loads saved marks from Supabase.
 

@@ -202,6 +202,7 @@ language plpgsql
 security invoker
 set search_path = public
 as $$
+#variable_conflict use_column
 declare
   v_user_id uuid := auth.uid();
   v_inserted boolean := false;
@@ -226,12 +227,13 @@ begin
   returning true into v_inserted;
 
   if coalesce(v_inserted, false) then
-    update public.subjects
-    set total_classes = total_classes + 1,
-        attended_classes = attended_classes + case when p_status = 'present' then 1 else 0 end
-    where id = p_subject_id
-      and user_id = v_user_id
-    returning * into v_subject;
+    update public.subjects as subject
+    set total_classes = subject.total_classes + 1,
+        attended_classes = subject.attended_classes
+          + case when p_status = 'present' then 1 else 0 end
+    where subject.id = p_subject_id
+      and subject.user_id = v_user_id
+    returning subject.* into v_subject;
 
     if not found then
       raise exception 'Subject not found or not owned by the signed-in user.';
